@@ -20,9 +20,16 @@ that does need the initialisation (the Xbox dongle and the Maxwell 2 are
 untested) still reads; the cost of the fallback is one extra round trip per poll
 while the headset is off.
 
-Every request in the sequence is a read: the byte that marks a write (0x00 or
-0x82) never appears in it, so polling does not change any setting on the
-headset.
+The 14 packets are HeadsetControl's, byte for byte (lib/devices/audeze_maxwell.hpp,
+UNIQUE_REQUESTS). Thirteen of them carry 0x80 in the byte after the length, and the
+seventh - 06 07 00 05 5A 03 00 07 1C - carries 0x00. An earlier version of this
+docstring claimed that byte marks a write and therefore never appears in the
+sequence; that claim was asserted, not measured, and the table above disproves it.
+Either that byte is not a plain read/write marker, or that one packet is not a
+plain read. Since it is part of the vendor's own initialisation and HeadsetControl
+sends it on every read, it stays - but the claim that the sequence writes nothing
+at all is withdrawn. What is enforced instead: the sequence is only sent to the
+product ids in KNOWN, and only ever to a vendor collection.
 
 Protocol and the packet tables come from the HeadsetControl project
 (Sapd/HeadsetControl, lib/devices/audeze_maxwell.hpp). The battery is their
@@ -332,10 +339,22 @@ class AudezeProvider(Provider):
             log.warning("hid.enumerate(audeze): %s", e)
             return []
 
-        # one icon per device: group the collections of one dongle together
+        # one icon per device: group the collections of one dongle together. Only the
+        # product ids in KNOWN are talked to: 0x3329 is Audeze's vendor id, and writing a
+        # 14-packet sequence of unknown effect to a device that is not one of these is not
+        # something a battery reader should do. An unknown id is named in the diagnostics
+        # so a reporter can ask for it.
         groups: Dict[Tuple[int, str], List[dict]] = {}
         for d in infos:
-            groups.setdefault((d["product_id"], d.get("serial_number") or ""), []).append(d)
+            pid = d["product_id"]
+            if pid not in KNOWN:
+                name = (d.get("product_string") or "").strip()
+                line = (f"[Audeze] pid={pid:04x} '{name}' is not a known Maxwell, "
+                        f"not writing the sequence to it")
+                if line not in self._diag:
+                    self._diag.append(line)
+                continue
+            groups.setdefault((pid, d.get("serial_number") or ""), []).append(d)
 
         # One icon per headset. The dongle and the cable are the same Maxwell:
         # plugged in for charging the headset keeps its wireless link and both
@@ -367,9 +386,20 @@ class AudezeProvider(Provider):
             # a switched-off device) and the battery sequence is not sent at all,
             # 1.5 s saved per poll for a value that cannot change while it is off.
             off = pid not in CABLE_PIDS and no_headset_linked(ifaces)
+            # The vendor collection (usage page 0xFF13) is the only one that speaks this
+            # protocol, and only vendor collections are ever written to: a device whose
+            # vendor collection is missing gets nothing rather than the sequence going to
+            # its consumer-control and telephony collections, which answer nothing, cost
+            # about 2.6 s per poll and are not meant to receive it.
             cands = ([d for d in ifaces if is_vendor_interface(d)]
                      or [d for d in ifaces if d.get("usage_page") == VENDOR_USAGE_PAGE]
-                     or sorted(ifaces, key=lambda d: d.get("interface_number", 0)))
+                     or [d for d in ifaces if (d.get("usage_page") or 0) >= 0xFF00])
+            if not cands:
+                self._diag.append("    no vendor collection on this device "
+                                  "(not writing to the standard collections)")
+                out.append(DeviceStatus(f"audeze:{serial}", HEADSET_NAME, None, False, True,
+                                        "audeze", kind="headset"))
+                continue
             level = None
             if off:
                 self._diag.append("    the dongle reports no headset linked "

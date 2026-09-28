@@ -289,6 +289,14 @@ class MchoseProvider(Provider):
             product = (ifaces[0].get("product_string") or "").strip()
             if product:
                 self._names[key] = product
+            if vid == G7_VID and pid != G7_PID:
+                # 0xA8A5 is a chip maker's vendor id ("YJX-CHIP"), not a model, so other
+                # devices can sit behind it. The G7 request was captured from the G7 only,
+                # and nothing is written to a device that is not it - not even the
+                # collection scan, because that is what produced the capture's traffic.
+                self._diag.append(f"[MCHOSE] vid={vid:04x} pid={pid:04x} product='{product}': "
+                                  f"not the G7 ({G7_PID:04x}), leaving it alone")
+                continue
             cols = [d for d in ifaces if (d.get("usage_page") or 0) >= 0xFF00]
             if vid == G7_VID:
                 # the G7 answers on 0xFF01 only; the other vendor collections are left

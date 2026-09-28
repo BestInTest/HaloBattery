@@ -20,6 +20,7 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 try {
   $null = [Windows.Gaming.Input.RawGameController, Windows.Gaming.Input, ContentType = WindowsRuntime]
+  $null = [Windows.Gaming.Input.Gamepad, Windows.Gaming.Input, ContentType = WindowsRuntime]
   # the controller list fills asynchronously in a new process
   for ($i = 0; $i -lt 30; $i++) {
     if ([Windows.Gaming.Input.RawGameController]::RawGameControllers.Count -gt 0) { break }
@@ -28,6 +29,10 @@ try {
   Start-Sleep -Milliseconds 300
   $list = @()
   foreach ($c in [Windows.Gaming.Input.RawGameController]::RawGameControllers) {
+    # RawGameControllers lists every controller Windows knows, including wheels, flight
+    # sticks and other devices XInput cannot see. Only the ones Windows can also give out
+    # as a Gamepad are XInput pads and belong in this list.
+    try { if (-not [Windows.Gaming.Input.Gamepad]::FromGameController($c)) { continue } } catch { }
     $b = $null
     try { $b = $c.TryGetBatteryReport() } catch { }
     $list += [pscustomobject]@{

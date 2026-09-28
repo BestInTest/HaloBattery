@@ -5,6 +5,21 @@ This receiver uses 64-byte feature reports with report ID 0xFF on the
 https://github.com/openrazer/openrazer/issues/1280 and also documented at
 https://github.com/Modzeleczek/RazerNariBatteryLevel .
 It must not be sent through the 2023 model's PA transport.
+
+The power states and stale header below come from BestInTest's own Windows
+captures on receiver 1532:0528 (2026-09-26), not from the Nari reference:
+  on battery:       ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e c0 50
+  charging:         ff 0f 05 fe 12 04 1f 08 05 05 03 09 10 80 50
+  charge complete:  ff 0f 05 fe 12 04 1f 08 05 06 05 06 10 88 64
+  cable unplugged:  ff 0f 05 fe 12 04 1f 08 05 03 05 01 10 38 64
+  headset off:      ff 01 00 fe 12 04 1f 08 05 05 03 09 10 88 50
+Each frame is 64 bytes; the remaining bytes in these captures were zero.
+The owner confirmed the physical states, including the full-charge LED.
+Bytes 9-10 also vary and are deliberately not part of REPLY_PREFIX.
+
+By 2026-09-28 the owner observed 100 -> 80 during use with no intermediate
+readings. This suggests coarse reporting, but does not establish 20% steps
+across the full range or a rounding rule. Display the reported value unchanged.
 """
 from __future__ import annotations
 
@@ -50,6 +65,7 @@ def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool
     Byte 14 remained 0x50 through extended charging, then changed to 0x64
     with state 0x06 when headset LED indicated a full charge.
     The same byte remained 100 after unplugging, with state 0x01.
+    Its update granularity and accuracy over a full discharge remain unverified.
     """
     dev = hid.device()
     try:

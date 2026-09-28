@@ -57,6 +57,11 @@ NAMED = [
 ]
 
 
+# the vendors whose controllers this provider reads; Windows.Gaming.Input also reports
+# controllers of other vendors (a DualSense, a wheel) and they are not XInput pads
+NAMED_VIDS = frozenset(vid for vid, _word, _name in NAMED)
+
+
 class XINPUT_GAMEPAD(ctypes.Structure):
     _fields_ = [("wButtons", ctypes.c_ushort), ("bLeftTrigger", ctypes.c_ubyte),
                 ("bRightTrigger", ctypes.c_ubyte), ("sThumbLX", ctypes.c_short),
@@ -91,6 +96,31 @@ def load_xinput():
 _BT_HID = re.compile(r"\{0000(?:1124|1812)-0000-1000-8000-00805f9b34fb\}[^#]*?vid&([0-9a-f]+)_pid&([0-9a-f]{4})")
 
 
+_HID_VID = re.compile(r"vid[_&]([0-9a-f]{4})")
+
+
+def bluetooth_only_vids(paths) -> set:
+    """Vendor ids whose HID interfaces are *all* on Bluetooth paths.
+
+    Windows.Gaming.Input is the only API that says how a controller is connected, and
+    it can fail, time out or return no report at all; the device paths are always
+    there. A vendor that also has an interface on a non-Bluetooth path (a dongle, a
+    cable) is not Bluetooth-only, so a 2.4 GHz receiver cannot be mistaken for one.
+    """
+    bt, other = set(), set()
+    for p in paths or ():
+        s = p.decode("ascii", "ignore") if isinstance(p, (bytes, bytearray)) else str(p)
+        s = s.lower()
+        m = _BT_HID.search(s)
+        if m:
+            bt.add(int(m.group(1)[-4:], 16))
+            continue
+        m = _HID_VID.search(s)
+        if m:
+            other.add(int(m.group(1)[-4:], 16))
+    return bt - other
+
+
 def bluetooth_ids(paths) -> set:
     """(vid, pid) of HID devices connected over Bluetooth, from the device paths."""
     out = set()
@@ -101,12 +131,14 @@ def bluetooth_ids(paths) -> set:
     return out
 
 
-def controller_name(hid_devices: List[dict]) -> str:
+def controller_name(hid_devices: List[dict]):
+    """-> (display name, vendor id). The vendor id lets the poll tell whether the
+    controller is on Bluetooth when Windows.Gaming.Input reports nothing."""
     for vid, word, name in NAMED:
         for d in hid_devices:
             if d.get("vendor_id") == vid and word in (d.get("product_string") or "").lower():
-                return name
-    return "Gamepad"
+                return name, vid
+    return "Gamepad", None
 
 
 def interpret(btype: int, blevel: int, last: Optional[int]):
@@ -114,8 +146,13 @@ def interpret(btype: int, blevel: int, last: Optional[int]):
     if btype == TYPE_DISCONNECTED:
         return None
     if btype == TYPE_WIRED:
-        # on the cable: charging; keep the last wireless reading if there is one
-        lvl = last if last is not None else LEVELS.get(blevel, (100, ""))[0]
+        # On the cable: charging; keep the last wireless reading if there is one.
+        # BatteryLevel is documented as valid only for wireless devices with a known
+        # battery type, and a wired pad carries whatever the driver left in that field
+        # - reading it turned a pad on the cable into "5% (empty)" whenever the byte
+        # happened to be 0. A wired controller has no battery to report, so say full
+        # rather than invent a level, and never read that byte here.
+        lvl = last if last is not None else 100
         return lvl, True, "on cable, charging"
     if btype == TYPE_UNKNOWN or blevel not in LEVELS:
         return None
@@ -185,7 +222,7 @@ class XInputProvider(Provider):
                 hid_devices += hidlist.enumerate(vid)
             except Exception:
                 pass
-        base_name = controller_name(hid_devices)
+        base_name, base_vid = controller_name(hid_devices)
 
         now = time.time()
         slots = []                                   # (slot, XInput reading or None)
@@ -208,16 +245,60 @@ class XInputProvider(Provider):
         # Windows.Gaming.Input gives a real percentage and works for controllers
         # that never report through XInput; match its controllers to the XInput
         # slots in order (with one controller, which is the usual case, it is exact)
-        reports = [c for c in self._wgi(now, frozenset(s for s, _ in slots)) if c.level is not None]
+        # one-to-one with the slot list: dropping the reports without a level first
+        # shifted every later controller onto the wrong slot, and with it that
+        # controller's level and name
+        # RawGameControllers is not the XInput slot list: it also holds controllers XInput
+        # cannot see, and the order is not the slot order, so indexing it blindly handed a
+        # pad a DualSense's name and level. Only the vendors this provider reads are kept,
+        # and the list is paired with the slots only when the two counts agree - a mismatch
+        # means the pairing cannot be trusted and the coarse XInput level is used instead.
+        reports = [r for r in self._wgi(now, frozenset(s for s, _ in slots)) if r.vid in NAMED_VIDS]
+        if len(reports) != len(slots):
+            if reports:
+                self._diag.append(f"[XInput] {len(reports)} Windows.Gaming.Input report(s) for "
+                                  f"{len(slots)} slot(s): not paired, the XInput levels are used")
+            reports = []
 
+        # separately: one of them failing must not blind the other
         try:
-            bt_ids = bluetooth_ids(hidlist.interface_paths())
+            paths = hidlist.interface_paths()
+        except Exception:
+            paths = []
+        try:
+            bt_ids = bluetooth_ids(paths)
         except Exception:
             bt_ids = set()
+        try:
+            bt_only = bluetooth_only_vids(paths)
+        except Exception:
+            bt_only = set()
+        # A game controller of one of these vendors on a Bluetooth path counts as Bluetooth
+        # on its own. bluetooth_only_vids() above needs *every* interface of the vendor to be
+        # on Bluetooth, so any Microsoft mouse or keyboard on USB switched it off for Xbox
+        # pads - and then a pad on Bluetooth kept a second icon.
+        for d in hid_devices:
+            path = d.get("path") or b""
+            s = path.decode("ascii", "ignore") if isinstance(path, (bytes, bytearray)) else str(path)
+            if not _BT_HID.search(s.lower()):
+                continue
+            page, usage = d.get("usage_page") or 0, d.get("usage") or 0
+            if (page == 0x0001 and usage in (0x04, 0x05)) or page >= 0xFF00:
+                bt_only = bt_only | {d.get("vendor_id") or 0}
+
         connected = []
         vias = {}
         for n, (slot, res) in enumerate(slots):
-            rep = reports[n] if n < len(reports) else None
+            rep = reports[n] if n < len(reports) and reports[n].level is not None else None
+            if rep is None and base_vid is not None and base_vid in bt_only:
+                # Windows.Gaming.Input said nothing, but every HID interface this vendor
+                # has sits on a Bluetooth path: the controller is on Bluetooth, which
+                # dedupe_controllers() needs to know to drop this entry in favour of the
+                # Bluetooth device Windows itself reports. The XInput level is kept -
+                # it is coarse but real, and better than an icon with no arc.
+                vias[slot] = "bluetooth"
+                self._diag.append(f"[XInput] slot {slot}: connected over Bluetooth "
+                                  "(from the device paths)")
             name = (rep.name if rep and rep.name else None) or base_name
             if rep is not None and (rep.vid, rep.pid) in bt_ids:
                 vias[slot] = "bluetooth"

@@ -16,8 +16,15 @@ source the Linux hid-sony / hid-playstation drivers and DS4Windows use.
       DualShock 4  report id 0x11: battery in byte 32
       DualSense    report id 0x31: status  in byte 54
 
-Reading the feature report to switch a Bluetooth controller into full mode is
-harmless over USB, so the same code path covers both connections.
+Over USB the feature report is harmless. Over Bluetooth it is NOT: the switch to
+the full report stays on until the controller is turned off, and in that mode games
+and launchers that read the controller through DirectInput stop seeing its input
+(issue #96; SDL documents the same for its own "enhanced" mode, and #101 shows it on
+the 8BitDo Pro 2 too). So over Bluetooth the app only listens by default: when Steam
+or a game has already switched the controller to the full report, the battery is
+read from it; otherwise the icon shows the controller without a level. The switch is
+sent over Bluetooth only when the user turns on "PlayStation over Bluetooth: full
+mode" in Preferences (`switch_bluetooth`).
 """
 from __future__ import annotations
 
@@ -34,12 +41,21 @@ from .base import DeviceStatus, Provider, hexdump, log
 
 SONY_VID = 0x054C
 
+# How long a controller that is connected but reports no battery keeps the app on its fast
+# (3 s) re-check path. Another app holding the controller never lets go, and that path costs
+# a full poll of every provider each time it runs.
+PENDING_WINDOW = 120.0
+
 # pid -> (display name, is_dualsense)
+# The DS4 USB wireless adapter: it streams report 01 whether or not a controller is
+# paired with it, and fills the battery field with zeros in that case.
+ADAPTER_PID = 0x0BA0
+
 KNOWN = {
     0x05C4: ("Sony DualShock 4", False),      # 2013 model
     0x09CC: ("Sony DualShock 4", False),      # 2016 model
     0x05C5: ("Sony DualShock 4", False),
-    0x0BA0: ("Sony DualShock 4", False),      # USB wireless adapter
+    ADAPTER_PID: ("Sony DualShock 4", False),  # USB wireless adapter
     0x0CE6: ("Sony DualSense", True),
     0x0DF2: ("Sony DualSense Edge", True),
 }
@@ -52,13 +68,23 @@ KNOWN = {
 DS4_REPORT = {False: (0x01, 30), True: (0x11, 32)}
 DUALSENSE_REPORT = {False: (0x01, 53), True: (0x31, 54)}
 
-# Bluetooth "wake up the full report" feature report id per family. Reading it
-# switches the controller into full-report mode; it is harmless over USB.
+# "Wake up the full report" feature report id per family. Reading it switches a
+# Bluetooth controller into full-report mode, which stays on until the controller is
+# turned off and hides it from DirectInput games (#96). Harmless over USB.
 TRIGGER_FEATURE = {False: 0x02, True: 0x05}   # is_dualsense -> feature id
 
 # Bluetooth HID paths carry this service GUID and the "VID&" spelling; USB paths
 # use "VID_" instead.
 _BT_HID_GUID = "{00001124-0000-1000-8000-00805f9b34fb}"
+
+# How long to wait for the battery report after the feature-report trigger, and how
+# long one controller may cost in total. A DualSense or DualShock 4 exposes several
+# collections (audio, touch, sensors, gamepad) and the battery rides on the gamepad
+# one; an interface that never answers used to cost the full window each, so three or
+# four of them held the poll loop for up to 6 s and delayed every other device's
+# update with it.
+WINDOW = 1.5
+BUDGET = 2.5
 
 
 def parse_ds4(byte: int) -> Tuple[int, bool]:
@@ -84,12 +110,23 @@ def parse_dualsense(byte: int) -> Optional[Tuple[int, bool]]:
     return level, False             # on battery, or an error state: show the level, no arc pulse
 
 
+def _battery_first(d) -> int:
+    """Sort key for the candidate interfaces: the gamepad collection carries the
+    battery, so it is tried first and the rest only if it says nothing."""
+    return 0 if (d.get("usage_page") == 0x01 and d.get("usage") in (0x04, 0x05)) else 1
+
+
 class PlayStationProvider(Provider):
     name = "playstation"
 
     def __init__(self):
         self._diag: List[str] = []
         self.pending = False        # a controller is connected but has not reported battery yet
+        self._pending_since: Dict[str, float] = {}   # key -> when its reading first went missing
+        # False (default): a Bluetooth controller is never switched to its full report, see
+        # the module docstring. Set by the app from Preferences before each poll.
+        self.switch_bluetooth = False
+        self._basic: bool = False   # the last _read saw a Bluetooth controller in its basic mode
 
     # ---- low level -------------------------------------------------------
     @staticmethod
@@ -98,8 +135,12 @@ class PlayStationProvider(Provider):
         s = s.lower()
         return "vid&" in s or _BT_HID_GUID in s
 
-    def _read(self, path, is_dualsense: bool) -> Optional[Tuple[int, bool]]:
-        """-> (level, charging) or None if no battery report arrived."""
+    def _read(self, path, is_dualsense: bool, window: float = WINDOW,
+              adapter: bool = False) -> Optional[Tuple[int, bool]]:
+        """-> (level, charging) or None if no battery report arrived.
+
+        `adapter` is the DS4 USB wireless adapter, which also reports when no controller
+        is paired with it."""
         dev = hid.device()
         try:
             dev.open_path(path)
@@ -115,14 +156,18 @@ class PlayStationProvider(Provider):
             rid, off = (DUALSENSE_REPORT if is_dualsense else DS4_REPORT)[bluetooth]
             self._diag.append(f"    {'Bluetooth' if bluetooth else 'USB'}: "
                               f"waiting for report {rid:#04x}, battery byte {off}")
-            # Bluetooth: reading this feature report switches the controller from
-            # its minimal report (no battery) to the full one. Harmless over USB.
-            trigger = TRIGGER_FEATURE[is_dualsense]
-            try:
-                dev.get_feature_report(trigger, 64)
-            except (OSError, ValueError) as e:
-                self._diag.append(f"    feature {trigger:#04x}: {e}")
-            deadline = time.time() + 1.5
+            # This feature report switches a Bluetooth controller from its minimal
+            # report (no battery) to the full one, and that breaks DirectInput games
+            # until the controller is turned off (#96). Over Bluetooth it is sent only
+            # when the user allowed it; over USB it is harmless.
+            listen_only = bluetooth and not self.switch_bluetooth
+            if not listen_only:
+                trigger = TRIGGER_FEATURE[is_dualsense]
+                try:
+                    dev.get_feature_report(trigger, 64)
+                except (OSError, ValueError) as e:
+                    self._diag.append(f"    feature {trigger:#04x}: {e}")
+            deadline = time.time() + window
             while time.time() < deadline:
                 try:
                     data = dev.read(78)
@@ -135,7 +180,23 @@ class PlayStationProvider(Provider):
                 # skip the stripped-down Bluetooth report 0x01 (no battery) and any
                 # other report; only the expected full report carries the battery
                 if data[0] != rid or len(data) <= off:
+                    if listen_only and data[0] == 0x01:
+                        # the controller streams its basic report: nobody has switched it
+                        # to the full one, and we must not (see above), so no level now
+                        self._basic = True
+                        self._diag.append("    basic Bluetooth mode (report 0x01): not "
+                                          "switched to the full report, see #96")
+                        return None
                     continue
+                if adapter and len(data) > 31 and data[31] & 0x04:
+                    # No controller is paired with the adapter: its report carries zeros
+                    # in the battery field, which showed up as a 0% icon and, at that
+                    # level, a low-battery alert for a controller that is not there. Bit 2
+                    # of status[1] is DS4_STATUS1_DONGLE_STATE in the Linux driver
+                    # (hid-playstation.c), where it means "not connected".
+                    self._diag.append(f"    the adapter reports no controller attached "
+                                      f"(status[1]={data[31]:#04x}), so this is not a reading")
+                    return None
                 self._diag.append(f"    report {data[0]:#04x} len={len(data)}: {hexdump(data, 64)}")
                 byte = data[off]
                 return parse_dualsense(byte) if is_dualsense else parse_ds4(byte)
@@ -153,6 +214,7 @@ class PlayStationProvider(Provider):
         self.pending = False
         if hid is None:
             return []
+        now = time.time()
         try:
             infos = hidlist.enumerate(SONY_VID)
         except Exception as e:  # pragma: no cover
@@ -177,31 +239,69 @@ class PlayStationProvider(Provider):
             self._diag.append(f"[PlayStation] {name} pid={pid:04x} "
                               f"{'Bluetooth' if bluetooth else 'USB'} interfaces={len(ifaces)} '{product}'")
             res = None
-            for d in ifaces:
+            basic = False
+            ordered = sorted(ifaces, key=_battery_first)
+            budget_end = time.time() + BUDGET
+            for d in ordered:
                 self._diag.append(
                     f"  iface={d.get('interface_number')} usage="
                     f"{d.get('usage_page', 0):04x}:{d.get('usage', 0):04x}")
-                res = self._read(d["path"], is_dualsense)
+                left = budget_end - time.time()
+                if left <= 0:
+                    self._diag.append("  out of time for this controller: "
+                                      "the remaining interfaces are skipped")
+                    break
+                self._basic = False
+                res = self._read(d["path"], is_dualsense, min(WINDOW, left),
+                                 adapter=pid == ADAPTER_PID)
                 if res is not None:
+                    break
+                if self._basic:
+                    basic = True
                     break
             if res is not None:
                 self._diag.append(f"  -> {res[0]}%{' charging' if res[1] else ''}")
             conns.append({"pid": pid, "name": name, "bluetooth": bluetooth,
-                          "mac": serial if bluetooth and serial else "", "reading": res})
+                          "mac": serial if bluetooth and serial else "", "reading": res,
+                          "basic": basic})
 
         out: List[DeviceStatus] = []
         for dev in self._merge(conns):
             key = f"ps:{dev['pid']:04x}:{dev['mac']}"
             res = dev["reading"]
-            if res is None:
-                # present but battery not read (just connected, or another app holds it):
-                # show the icon without an arc and re-check soon
-                self.pending = True
-                log.info("[PlayStation] %s: connected, battery not reported yet", dev["name"])
+            if res is None and dev.get("basic"):
+                # Bluetooth, basic mode, not switched on purpose: this is the normal state,
+                # not a controller that is still starting, so no fast re-check either
+                self._pending_since.pop(key, None)
                 out.append(DeviceStatus(key, dev["name"], None, False, True, "playstation",
-                                        "connected, battery level not reported yet"))
+                                        "level shown over Bluetooth only while Steam or a game "
+                                        "uses it"))
+                continue
+            if res is None:
+                # Present but no battery read: just connected, or another app (DS4Windows,
+                # HidHide) is holding the controller so `open` fails on every poll. Show the
+                # icon without an arc and re-check soon - but only for a while. `pending`
+                # makes the app poll every provider every 3 s, and a controller that can
+                # never be opened kept that up for as long as it stayed plugged in.
+                since = self._pending_since.get(key)
+                if since is None:
+                    since = self._pending_since[key] = now
+                    log.info("[PlayStation] %s: connected, battery not reported yet", dev["name"])
+                if now - since < PENDING_WINDOW:
+                    self.pending = True
+                    approx = "connected, battery level not reported yet"
+                else:
+                    del self._pending_since[key]
+                    self._diag.append(f"  {dev['name']}: no battery report for "
+                                      f"{PENDING_WINDOW:.0f} s, another app may be holding the "
+                                      f"controller - back to the normal poll interval")
+                    log.info("[PlayStation] %s: no battery report for %.0f s, not re-checking "
+                             "every 3 s any more", dev["name"], PENDING_WINDOW)
+                    approx = "connected, battery not readable (another app may hold it)"
+                out.append(DeviceStatus(key, dev["name"], None, False, True, "playstation", approx))
                 continue
             level, charging = res
+            self._pending_since.pop(key, None)
             out.append(DeviceStatus(key, dev["name"], level, charging, True, "playstation"))
         return out
 
