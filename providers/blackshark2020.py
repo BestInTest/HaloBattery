@@ -6,19 +6,21 @@ https://github.com/openrazer/openrazer/issues/1280 and also documented at
 https://github.com/Modzeleczek/RazerNariBatteryLevel .
 It must not be sent through the 2023 model's PA transport.
 
-The power states and stale header below come from BestInTest's own Windows
-captures on receiver 1532:0528 (2026-09-26), not from the Nari reference:
+The power states and stale header below were observed through direct HID
+reads on receiver 1532:0528 on Windows, without Synapse.
+The Nari reference confirms the request format, reply prefix and voltage
+layout. The BlackShark-specific power states were checked on the hardware:
   on battery:       ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e c0 50
   charging:         ff 0f 05 fe 12 04 1f 08 05 05 03 09 10 80 50
   charge complete:  ff 0f 05 fe 12 04 1f 08 05 06 05 06 10 88 64
   cable unplugged:  ff 0f 05 fe 12 04 1f 08 05 03 05 01 10 38 64
   headset off:      ff 01 00 fe 12 04 1f 08 05 05 03 09 10 88 50
-Each frame is 64 bytes; the remaining bytes in these captures were zero.
-The owner confirmed the physical states, including the full-charge LED.
+Each frame is 64 bytes; the remaining bytes in these reads were zero.
+Physical states were checked during the reads, including the full-charge LED.
 Bytes 9-10 also vary and are deliberately not part of REPLY_PREFIX.
 
-By 2026-09-28 the owner observed 100 -> 80 during use with no intermediate
-readings. This suggests coarse reporting, but does not establish 20% steps
+Change from 100 to 80 was observed during use with no intermediate readings.
+This suggests coarse reporting, but does not establish 20% steps
 across the full range or a rounding rule. Display the reported value unchanged.
 """
 from __future__ import annotations

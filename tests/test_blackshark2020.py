@@ -1,8 +1,9 @@
 """BlackShark 2020 regression tests; no hardware is opened.
 
-Fixtures are BestInTest's own Windows captures from 2026-09-26, with physical
-power states confirmed by the owner (including the full-charge LED). See the
-provider docstring for provenance. Mutated frames exercise invalid responses;
+Fixtures come from direct HID reads on receiver 1532:0528 on Windows,without Synapse.
+Physical power states were checked during the reads,
+including the full-charge LED. See the provider (blackshark2020.py) docstring for more info.
+Mutated frames exercise invalid responses;
 they are not evidence of additional supported hardware states or percentages.
 
 Run: python -m unittest discover -s tests
