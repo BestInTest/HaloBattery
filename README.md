@@ -14,7 +14,7 @@ Tested on real hardware:
 
 | Device | Connection | How the battery is read |
 |---|---|---|
-| Razer BlackShark V2 Pro (2020) | 2.4 GHz receiver (1532:0528) | 64-byte feature report `0xFF` on usage page `0xFF00`, request `FF 0A 00 FD 04 12 F1 02 05`. Reads the reported battery level and charging flag; tested on Windows on battery, while charging, switched off and reconnected. The USB charging cable (1532:052E) is skipped to keep one icon; the receiver must remain plugged in |
+| Razer BlackShark V2 Pro (2020) | 2.4 GHz receiver (1532:0528) | 64-byte feature report `0xFF` on usage page `0xFF00`, request `FF 0A 00 FD 04 12 F1 02 05`. Reads the device-reported percentage and power state: on battery (0x01), charging (0x09), charge complete (0x06). Observed 80 changing to 100 at full charge and remaining 100 after unplugging. Percentage accuracy and update granularity over a full discharge cycle are unverified. Rejects stale replies when switched off. The charging cable (1532:052E) is skipped to keep one icon; the receiver must remain plugged in |
 | Razer BlackShark V2 Pro (2023) | 2.4 GHz receiver (1532:0555) | The headset's own "PA" protocol: output reports 0x02 on the vendor interface 0xFF00, remote mode 0xE1, commands 0x21 (battery) and 0x2A (charging) |
 | WLmouse Beast X Max | 8K receiver (36A7:A880) and USB cable | Feature request `02 02 00 83`; if there is no reply, the mouse heartbeat is used. Receiver and cable share one icon |
 | Razer Basilisk V3 Pro, Razer Basilisk Ultimate (tested by users) | 2.4 GHz receiver | The standard Razer 90-byte feature report, as used by Synapse and OpenRazer: power class 0x07, commands 0x80 (battery) and 0x84 (charging) |

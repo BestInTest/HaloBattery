@@ -31,7 +31,7 @@ def is_candidate(info: dict) -> bool:
 
 
 def parse_reply(data) -> Optional[Tuple[int, int, int]]:
-    """Return (power state, millivolts, percent) for a complete battery reply.
+    """Return (power state, millivolts, reported level byte) for a complete reply.
 
     Keep the report ID: unlike the generic Razer protocol, it is part of the
     64-byte frame. Do not accept a request echo or an unrelated feature reply.
@@ -41,14 +41,16 @@ def parse_reply(data) -> Optional[Tuple[int, int, int]]:
         return None
     state = data[11]
     voltage = int.from_bytes(data[12:14], "big")
-    level = data[14]
-    if level > 100:
-        return None
-    return state, voltage, level
+    return state, voltage, data[14]
 
 
 def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool]:
-    """Return ('ok'|'offline'|'fail', percent, charging)."""
+    """Return ('ok'|'offline'|'fail', level or None, charging).
+
+    Byte 14 remained 0x50 through extended charging, then changed to 0x64
+    with state 0x06 when headset LED indicated a full charge.
+    The same byte remained 100 after unplugging, with state 0x01.
+    """
     dev = hid.device()
     try:
         dev.open_path(path)
@@ -65,14 +67,17 @@ def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool
             diag.append(f"    [2020] feature ff: {hexdump(data, 16)}")
             result = parse_reply(data)
             if result is not None:
-                state, voltage, level = result
-                diag.append(f"    [2020] power={state:02x} voltage={voltage}mV level={level}%")
+                state, voltage, raw14 = result
+                diag.append(f"    [2020] power={state:02x} voltage={voltage}mV "
+                            f"byte14={raw14:02x}")
                 if voltage == 0:
                     return "offline", None, False
-                if state not in (0x01, 0x09):
+                if state not in (0x01, 0x06, 0x09):
                     diag.append(f"    [2020] unknown power state: {state:02x}")
                     return "fail", None, False
-                return "ok", level, bool(state & 0x08)
+                level = raw14 if 0 <= raw14 <= 100 else None
+                diag.append(f"    [2020] device-reported level={level}")
+                return "ok", level, state == 0x09
             if time.monotonic() >= deadline:
                 if len(data) == REPORT_LEN and bytes(data).startswith(NO_REPLY_PREFIX):
                     diag.append("    [2020] no fresh headset reply (off / out of range)")

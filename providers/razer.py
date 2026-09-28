@@ -288,8 +288,15 @@ class RazerProvider(Provider):
                 log.info("[Razer] %s: answering again", name)
             status, level, charging = st
             if status == STATUS_OK:
-                self._last[key] = (level, bool(charging), time.time())
-                out.append(DeviceStatus(key, name, level, bool(charging), True, "razer"))
+                if level is not None:
+                    self._last[key] = (level, bool(charging), time.time())
+                approx = ""
+                if pid == blackshark2020.PID and level is None:
+                    approx = "battery level unknown"
+                    if charging:
+                        approx += ", charging"
+                out.append(DeviceStatus(key, name, level, bool(charging), True, "razer",
+                                        approx=approx))
         return out
 
     def _poll_group(self, gkey, ifaces, pref_tid):
