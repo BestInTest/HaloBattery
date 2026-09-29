@@ -78,7 +78,9 @@ def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], Opti
     Byte 14 remained 0x50 through extended charging, then changed to 0x64
     with state 0x06 when headset LED indicated a full charge.
     The same byte remained 100 after unplugging, with state 0x01.
-    Its update granularity and accuracy over a full discharge remain unverified.
+    Connecting the charger at 10 caused an immediate jump to 80. While state
+    0x09 indicates active charging, hide the unreliable level; retain its raw
+    byte in diagnostics. Charge-complete state 0x06 uses the reported level.
     """
     dev = hid.device()
     try:
@@ -113,6 +115,9 @@ def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], Opti
                                 "keeping fresh reading, charging unknown")
                 level = raw14 if 0 <= raw14 <= 100 else None
                 diag.append(f"    [2020] device-reported level={level}")
+                if charging is True:
+                    diag.append("    [2020] level hidden: unreliable during charging")
+                    level = None
                 return "ok", level, charging
             if time.monotonic() >= deadline:
                 if len(data) == REPORT_LEN and bytes(data).startswith(NO_REPLY_PREFIX):

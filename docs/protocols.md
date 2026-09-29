@@ -60,18 +60,21 @@ Its receiver publishes two collections and neither answers the standard Razer mo
 
 Uses a 64-byte feature report `0xFF` on usage page `0xFF00`, with request
 `FF 0A 00 FD 04 12 F1 02 05`. Reads the device-reported level and power state.
-Observed states are on battery (`0x01`), low battery (`0x02`, then `0x03`),
+Observed states are on battery (`0x01`), low battery (`0x02`), then very low battery (`0x03`),
 charging (`0x09`) and charge complete (`0x06`). An unknown state keeps a fresh
 battery reading visible and marks the charging state as unknown. Stale replies
 are rejected. The charging cable (1532:052E) is skipped to keep one icon;
 the receiver must remain plugged in.
 
-Observed discharge levels were 100 -> 80 -> 50 -> 30 -> 10, with no intermediate
-values observed. Thresholds and percentage accuracy remain unverified.
+**The device-reported battery percentage is imprecise and should be treated as
+a rough indication of charge, not an exact measurement.** Observed discharge
+levels were 100 -> 80 -> 50 -> 30 -> 10, with no intermediate values.
+The full set of levels and their thresholds have not been established.
 Connecting the charger produced an immediate jump from 10 to 80, so the reported
 percentage during charging is unreliable. At charge completion the receiver
 reported 100, which remained 100 after unplugging. The application currently
-displays the reported level unchanged.
+hides the unreliable level during active charging and shows the charging state.
+On battery and after charge completion, it displays the reported level unchanged.
 
 ### Razer BlackShark V2 Pro (2023)
 

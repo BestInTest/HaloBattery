@@ -68,7 +68,7 @@ class BatteryTests(unittest.TestCase):
 
     def test_read_on_battery_and_charging(self):
         self.assertEqual(self.read([BATTERY]), ("ok", 80, False))
-        self.assertEqual(self.read([CHARGING]), ("ok", 80, True))
+        self.assertEqual(self.read([CHARGING]), ("ok", None, True))
         self.assertEqual(self.read([HALF]), ("ok", 50, False))
         self.assertEqual(self.read([HALF_LATER]), ("ok", 50, False))
         self.assertEqual(self.read([LOW]), ("ok", 30, False))
@@ -79,7 +79,7 @@ class BatteryTests(unittest.TestCase):
 
     def test_level_survives_charge_completion_and_unplugging(self):
         for reply, expected in ((BATTERY, ("ok", 80, False)),
-                                (CHARGING, ("ok", 80, True)),
+                                (CHARGING, ("ok", None, True)),
                                 (FULL, ("ok", 100, False)),
                                 (UNPLUGGED, ("ok", 100, False))):
             with self.subTest(reply=reply):
@@ -157,14 +157,15 @@ class BatteryTests(unittest.TestCase):
                 patch.object(blackshark2020.time, "sleep"), \
                 patch.object(blackshark2020.time, "monotonic", side_effect=[0, 0, 0, 0, 1, 0]), \
                 patch.object(p, "_poll_group") as generic, patch.object(p, "_poll_pa") as pa:
-            for expected in ((80, True), (100, False), (100, False), None, (80, False)):
+            for expected in ((None, True), (100, False), (100, False), None, (80, False)):
                 result = p.poll()
                 if expected is None:
                     self.assertEqual(result, [])
                 else:
                     self.assertEqual(len(result), 1)
                     self.assertEqual((result[0].level, result[0].charging), expected)
-                    self.assertEqual(result[0].approx, "")
+                    self.assertEqual(result[0].approx,
+                                     "battery level unknown, charging" if expected[0] is None else "")
                     self.assertTrue(result[0].online)
         generic.assert_not_called()
         pa.assert_not_called()
