@@ -28,6 +28,10 @@ CHARGING = frame("ff 0f 05 fe 12 04 1f 08 05 05 03 09 10 80 50")
 OFFLINE = frame("ff 01 00 fe 12 04 1f 08 05 05 03 09 10 88 50")
 FULL = frame("ff 0f 05 fe 12 04 1f 08 05 06 05 06 10 88 64")
 UNPLUGGED = frame("ff 0f 05 fe 12 04 1f 08 05 03 05 01 10 38 64")
+HALF = frame("ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e a0 32 00")
+HALF_LATER = frame("ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e 70 32 00")
+LOW = frame("ff 0f 05 fe 12 04 1f 08 05 03 05 02 0e 08 1e 00")
+BATTERY_10 = frame("ff 0f 05 fe 12 04 1f 08 05 03 05 03 0d a0 0a 00")
 
 
 class BatteryTests(unittest.TestCase):
@@ -65,6 +69,10 @@ class BatteryTests(unittest.TestCase):
     def test_read_on_battery_and_charging(self):
         self.assertEqual(self.read([BATTERY]), ("ok", 80, False))
         self.assertEqual(self.read([CHARGING]), ("ok", 80, True))
+        self.assertEqual(self.read([HALF]), ("ok", 50, False))
+        self.assertEqual(self.read([HALF_LATER]), ("ok", 50, False))
+        self.assertEqual(self.read([LOW]), ("ok", 30, False))
+        self.assertEqual(self.read([BATTERY_10]), ("ok", 10, False))
 
     def test_full_charge_remains_online_without_charging(self):
         self.assertEqual(self.read([FULL]), ("ok", 100, False))
@@ -107,7 +115,7 @@ class BatteryTests(unittest.TestCase):
 
     def test_unknown_power_state_is_not_guessed(self):
         data = bytearray(BATTERY)
-        data[11] = 0x02  # Nari's state is not verified for the BlackShark 2020.
+        data[11] = 0xFF  # No hardware observation establishes this state.
         self.assertEqual(self.read([data]), ("fail", None, False))
 
     def test_zero_voltage_is_offline(self):

@@ -15,13 +15,21 @@ layout. The BlackShark-specific power states were checked on the hardware:
   charge complete:  ff 0f 05 fe 12 04 1f 08 05 06 05 06 10 88 64
   cable unplugged:  ff 0f 05 fe 12 04 1f 08 05 03 05 01 10 38 64
   headset off:      ff 01 00 fe 12 04 1f 08 05 05 03 09 10 88 50
-Each frame is 64 bytes; the remaining bytes in these reads were zero.
+Each frame above is 64 bytes; the remaining bytes in these reads were zero.
 Physical states were checked during the reads, including the full-charge LED.
 Bytes 9-10 also vary and are deliberately not part of REPLY_PREFIX.
 
-Change from 100 to 80 was observed during use with no intermediate readings.
-This suggests coarse reporting, but does not establish 20% steps
-across the full range or a rounding rule. Display the reported value unchanged.
+Further direct reads on 2026-09-29 recorded these first 16 bytes:
+  on battery:       ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e a0 32 00
+  on battery later: ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e 70 32 00
+  low battery:      ff 0f 05 fe 12 04 1f 08 05 03 05 02 0e 08 1e 00
+  battery at 10%:   ff 0f 05 fe 12 04 1f 08 05 03 05 03 0d a0 0a 00
+State 0x02 coincided with the headset's low-battery sound and red LED.
+The reported level stayed at 50 while voltage fell from 3744 to 3696 mV,
+then reported 30 at 3592 mV with the low-battery warning.
+Another read during discharge showed state 0x03 at 3488 mV and level 10.
+Observed levels during use were 100 -> 80 -> 50 -> 30 -> 10. Values between
+were not observed.
 """
 from __future__ import annotations
 
@@ -90,7 +98,8 @@ def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool
                             f"byte14={raw14:02x}")
                 if voltage == 0:
                     return "offline", None, False
-                if state not in (0x01, 0x06, 0x09):
+                # On battery: 0x02 with the low-battery warning, then 0x03 at 10%.
+                if state not in (0x01, 0x02, 0x03, 0x06, 0x09):
                     diag.append(f"    [2020] unknown power state: {state:02x}")
                     return "fail", None, False
                 level = raw14 if 0 <= raw14 <= 100 else None
