@@ -17,6 +17,7 @@ Windows 10/11 only; on by default (toggle in the tray menu).
 from __future__ import annotations
 
 import json
+import queue
 import os
 import re
 import subprocess
@@ -393,6 +394,14 @@ class BluetoothProvider(Provider):
         return list(self._diag)
 
 
+# The PowerShell script emits a snapshot on start, on every change of the Bluetooth connection
+# key and otherwise on a 60 s timer, so a healthy child is never silent for much longer than a
+# minute. Silence beyond this is a wedged child: WinRT calls can block indefinitely, and the
+# script cannot report that it is stuck.
+STALL_TIMEOUT = 180.0
+STALL_LIMIT = 2
+
+
 class BluetoothWatcher:
     """Runs WATCH_SCRIPT in one long-lived PowerShell process and feeds every
     snapshot it prints to the provider. Restarts the process if it dies; after
@@ -404,6 +413,7 @@ class BluetoothWatcher:
         self.on_update = on_update
         self.failed = False
         self.snapshots = 0
+        self.stalls = 0
         self._stop = threading.Event()
         self._proc: Optional[subprocess.Popen] = None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -428,6 +438,19 @@ class BluetoothWatcher:
             except OSError:
                 pass
 
+    @staticmethod
+    def _pump(stream, q: "queue.Queue") -> None:
+        """Read the child's stdout in its own thread so that a silent child cannot park the
+        caller, and hand each line over with a timeout to wait on. A thread rather than
+        `stream.readline()` in the main loop because a blocking read cannot be interrupted."""
+        try:
+            for line in stream:
+                q.put(line)
+        except (OSError, ValueError):          # the pipe was closed under us
+            pass
+        finally:
+            q.put(None)
+
     def _run(self) -> None:
         quick_failures = 0
         while not self._stop.is_set():
@@ -441,7 +464,35 @@ class BluetoothWatcher:
                 self.failed = True
                 return
             got_output = False
-            for line in self._proc.stdout:
+            stalled = False
+            q: "queue.Queue" = queue.Queue()
+            reader = threading.Thread(target=self._pump, args=(self._proc.stdout, q), daemon=True)
+            reader.start()
+            last = time.time()
+            while True:
+                try:
+                    line = q.get(timeout=1.0)
+                except queue.Empty:
+                    if self._stop.is_set():
+                        break
+                    if self._proc.poll() is not None and q.empty():
+                        break                 # the child is gone and its output is drained
+                    if time.time() - last > STALL_TIMEOUT:
+                        # Reading `for line in self._proc.stdout` parked this thread for ever
+                        # on a wedged child: no output, `failed` still False, running() still
+                        # True, and the app never fell back to its once-a-minute polling.
+                        log.warning("bluetooth watcher: no output for %.0f s, killing PowerShell",
+                                    STALL_TIMEOUT)
+                        try:
+                            self._proc.kill()
+                        except OSError:
+                            pass
+                        stalled = True
+                        break
+                    continue
+                if line is None:              # end of the child's output
+                    break
+                last = time.time()
                 text = line.decode("utf-8", errors="replace").strip().lstrip("\ufeff")
                 if not text:
                     continue
@@ -456,6 +507,15 @@ class BluetoothWatcher:
             self._proc.wait()
             if self._stop.is_set():
                 return
+            if stalled:
+                self.stalls += 1
+                if self.stalls >= STALL_LIMIT:
+                    log.warning("bluetooth watcher: PowerShell stalled %d times, giving up - "
+                                "falling back to polling once a minute", self.stalls)
+                    self.failed = True
+                    return
+                self._stop.wait(5)
+                continue
             log.warning("bluetooth watcher: PowerShell exited with code %s", self._proc.returncode)
             quick = not got_output or time.time() - started < 30
             quick_failures = quick_failures + 1 if quick else 0

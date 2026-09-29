@@ -199,12 +199,52 @@ PICTOS = {"headset": (_headset, 0, 2, 18), "mouse": (_mouse, 0, 0, 19.5),
           "dualsense": (_dualshock, 0, -0.2, 18.4)}   # its own silhouette is still to come
 
 
+# ---------------------------------------------------------------- percentage
+# The number in the ring ("Percentage in the icon"). A tray icon is shown at 16-24 px,
+# so the digits are as large and as bold as the inside of the ring allows: two digits
+# fill TEXT_WIDTH of the icon, "100" gets smaller rather than touching the ring.
+TEXT_WIDTH = 40.0          # of the 64-unit icon
+TEXT_HEIGHT = 30.0
+_FONT_FILES = ("segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf")
+
+
+@lru_cache(maxsize=32)
+def _font(size: int):
+    from PIL import ImageFont
+    for name in _FONT_FILES:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size)      # Pillow 10.1+: a scalable built-in font
+    except TypeError:                            # pragma: no cover - older Pillow
+        return ImageFont.load_default()
+
+
+def _number(d: ImageDraw.ImageDraw, text: str, col) -> None:
+    """Draw `text` centred in the ring, as large as TEXT_WIDTH x TEXT_HEIGHT allows."""
+    size = _r(TEXT_HEIGHT * 1.4)
+    for _ in range(6):                           # shrink until it fits (2-3 steps at most)
+        font = _font(size)
+        x0, y0, x1, y1 = d.textbbox((0, 0), text, font=font)
+        w, h = x1 - x0, y1 - y0
+        scale = min(_r(TEXT_WIDTH) / max(w, 1), _r(TEXT_HEIGHT) / max(h, 1))
+        if scale >= 0.98:
+            break
+        size = max(8, int(size * scale))
+    # centre the ink, not the font's line box, so digits sit in the middle of the ring
+    d.text((_r(32) - (x0 + x1) / 2, _r(32) - (y0 + y1) / 2), text, font=font, fill=col)
+
+
 # ---------------------------------------------------------------- icon
 def render(level: Optional[int], charging: bool, online: bool, low: int = 20,
            light_taskbar: Optional[bool] = None, badge: str = "",
-           pulse: float = 1.0) -> Image.Image:
+           pulse: float = 1.0, text: str = "") -> Image.Image:
     """badge - device kind: headset / mouse / keyboard / bluetooth (or H / M / K / B).
-    pulse - arc brightness 0..1 (a frame of the charging "breathing" animation)."""
+    pulse - arc brightness 0..1 (a frame of the charging "breathing" animation).
+    text - drawn in the centre instead of the pictogram (the battery percentage); red or
+    amber like the arc when the level is low, the taskbar colour otherwise."""
     if light_taskbar is None:
         light_taskbar = taskbar_is_light()
     fg = (0, 0, 0) if light_taskbar else (255, 255, 255)
@@ -235,9 +275,12 @@ def render(level: Optional[int], charging: bool, online: bool, low: int = 20,
                 x, y = 32 + rr * math.cos(t), 32 + rr * math.sin(t)
                 d.ellipse((_r(x - w / 2), _r(y - w / 2), _r(x + w / 2), _r(y + w / 2)), fill=c)
 
-    # device pictogram
+    # the percentage, or else the device pictogram
     kind = KINDS.get(badge)
-    if kind:
+    if text:
+        col = arc_color(level, False, low, fg) if active else fg
+        _number(d, text, col + (alpha,))
+    elif kind:
         fn, dx, dy, s = PICTOS[kind]
         fn(d, 32 + dx, 32 + dy, s, fg + (alpha,))
 
@@ -257,9 +300,10 @@ def breath_level(phase: float) -> float:
 
 
 def charging_frames(level: Optional[int], online: bool, low: int = 20,
-                    light_taskbar: Optional[bool] = None, badge: str = ""):
+                    light_taskbar: Optional[bool] = None, badge: str = "", text: str = ""):
     """All "breathing" frames for the current state (rendered once and cached)."""
-    return [render(level, True, online, low, light_taskbar, badge, breath_level(i / BREATH_FRAMES))
+    return [render(level, True, online, low, light_taskbar, badge, breath_level(i / BREATH_FRAMES),
+                   text=text)
             for i in range(BREATH_FRAMES)]
 
 

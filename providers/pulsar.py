@@ -1,4 +1,4 @@
-"""Pulsar, ATK and VXE wireless mice over USB/HID, without vendor software.
+"""Pulsar, ATK, VXE and Hitscan wireless mice over USB/HID, without vendor software.
 
 Protocol from andrewrabert/python-pulsar-mouse-tool, which also backs the
 "HID: pulsar" driver in review for the Linux kernel and lists these ids:
@@ -27,6 +27,16 @@ these Compx-based receivers: its get_Crc() is 0x55 minus the sum of the first fi
 payload bytes, the result goes in byte 15, and the frame is sent with sendReport(8, ...) -
 so the frame on the wire sums to 0x55, the rule this file uses. (Its battery read is for
 the G-Wolves protocol; the level offsets here rest on the two sources above.)
+
+The Hitscan Hyperlight speaks the same frame, on the same kind of vendor collection
+(ff02:0002): sopparus/hitscan-battery mapped it from USBPcap captures of Hitscan Utility
+1.0.2 in both cable (3770:0100) and receiver (3770:0200) mode and reads it with a plain
+write()/read(), command 0x04, the level in byte 6, the flag in byte 7, checksum 0x55 minus
+the sum. Its notes left byte 8 and byte 9 unresolved; across its captures those read
+0x1129 (4393 mV) while charging and 0x1073 (4211 mV) on battery - the big-endian millivolt
+field this file already reads. Its own warning also applies: the vendor application's
+battery indicator is broken (it showed 100 % while the device answered 75), so the raw
+byte is the truth, which is what this file reports.
 
 Frames are 17 bytes, big-endian, report id 0x08:
 
@@ -139,6 +149,10 @@ PIDS: Dict[int, Dict[int, str]] = {
     },
     0x373B: {
         0x1085: "ATK VXE R1 SE+ (2.4 GHz)",
+    },
+    0x3770: {
+        0x0200: "Hitscan Hyperlight (2.4 GHz)",
+        0x0100: "Hitscan Hyperlight (wired)",
     },
 }
 

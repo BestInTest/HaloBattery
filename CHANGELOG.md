@@ -17,6 +17,78 @@ and the project follows [Semantic Versioning](https://semver.org/).
   while charging and 100 -> 80 during subsequent use without intermediate readings;
   exact reporting thresholds and accuracy remain unverified.
 
+## [1.13.0] - 2026-09-29
+
+A new Windows 11 style tray menu and a batch of tray features: turn device types off,
+an alert level per device, estimated time left, the percentage in the icon, quiet while
+gaming and a status file for other apps. PS4 / PS5 controllers over Bluetooth no longer
+break DirectInput games (#96), and 8BitDo controllers in D-input mode are read the same
+listen-only way. New devices: Corsair Dark Core RGB Pro SE, Razer BlackWidow V3 Pro,
+Hitscan Hyperlight, HyperX Cloud Alpha 2 and Angry Miao AM Infinity 8K, plus many fixes
+from contributors' reviews. Notifications are now titled "HaloBattery".
+
+### Added
+- 8BitDo Pro 2, Pro 3, SN30 Pro and SF30 Pro in D-input mode (#101). The level is read
+  from the controller's enhanced report while Steam or a game has switched it on; the app
+  never switches it itself, because that mode hides the controller from DirectInput games
+  until it is turned off. Otherwise the icon shows the controller without a level. In
+  XInput mode these controllers already worked. Unverified on hardware here.
+- LAMZU Maya X: confirmed on a real mouse on its 8K dongle with 1.12.0, so it is no longer
+  marked unverified.
+- **Device types** in Preferences: turn off any brand or device family (Razer, Logitech,
+  PlayStation controllers, ...). A type that is off is not polled and its devices are not
+  opened; its icons go away at once.
+- **Low battery alert at** in the menu of a device: an alert level for that device only,
+  or Default to follow Preferences. The red ring of the icon follows it too.
+- **Estimated time left** in the tooltip ("about 5 h of use left"), from a least-squares
+  fit of the level against the time the device was awake and on battery since its last
+  charge. Time asleep, switched off or with the PC suspended does not count. No estimate
+  until 30 minutes of use and a 3% drop; kept in `%APPDATA%\HaloBattery\history.json`
+  so it survives a restart. Can be turned off in Preferences.
+- **Percentage in the icon** in Preferences: the level as a number in the ring instead of
+  the pictogram, sized to stay inside the ring ("100" included) and amber or red like the
+  arc when the battery is low. Devices that only report rough steps keep their pictogram.
+- **Quiet while gaming** in Preferences (on by default): while a full-screen app is in
+  front (`SHQueryUserNotificationState`), notifications are held and shown when it
+  closes, one per device and kind, and the poll interval becomes 5 minutes so the app
+  talks to the devices less during a game (#76). A plug-in still polls at once.
+- **Status file for other apps** in Preferences (off by default):
+  `%APPDATA%\HaloBattery\status.json`, rewritten after every poll (atomically), with each
+  device's name, level, charging, online, kind, alert level, seconds of use left and
+  tooltip text, for Rainmeter, Stream Deck or scripts.
+- Audeze Maxwell: a **stuck dongle** is recognised. An Xbox dongle (`3329:4B18`) that said a
+  headset was linked, in PC mode with the headset on and playing audio, answered every
+  packet with an empty echo of the request (`07 00 80 00 ...`), so no battery ever arrived
+  and there was no icon; unplugging the dongle and plugging it back in fixed it at once.
+  After two such polls in a row the headset now gets a greyed icon that says to replug the
+  dongle, and the diagnostics say what was seen. This may be HeadsetControl #460.
+- Corsair Dark Core RGB Pro SE: the battery over its 2.4 GHz dongle (1B1C:1B7F),
+  through the Dark Core / Ironclaw "nxp" protocol from ckb-next. Its five-step
+  level is shown as a gauge ("about 50%") and no charging state is reported.
+  **Unverified** here: no Corsair mouse was on hand, so the collection and the
+  offsets are the reference's until the reporter of #56 confirms.
+- Razer BlackWidow V3 Pro: the battery over its 2.4 GHz receiver (1532:025C), through
+  the same class 0x07 commands the mice use (OpenRazer's RazerBlackWidowV3ProWireless
+  class lists them). The wired id 1532:025A has no battery and is left out.
+  **Unverified** here: no Razer keyboard was on hand, so the level arrives as the
+  reference describes it until the reporter of #56 confirms.
+- HyperX Cloud Alpha 2 (station 03F0:08BE): the battery percentage and the charging
+  state over the station's vendor collection. Decoded from the two USBPcap captures
+  attached to issue #26 at 51 % and 67 % and matched to NGENUITY's own display;
+  confirmed on real hardware by the reporter.
+- AM Infinity 8K (Angry Miao) on its 2.4 GHz receiver (3151:5007), the same id
+  as the AJAZZ AJ159 APEX (2.4G 8K): the AJAZZ Control Center project's
+  AJ-series exchange over the receiver's ffff:0002 control collection - a
+  zero-payload 0xF7 status poll brings the 2.4G telemetry up, then the charge
+  reads from status report 0x05. No charging state is reported. **Unverified**
+  here: the exchange is confirmed on the reference project's own unit, so the
+  layout stands until the reporter of #72 confirms it on the AM Infinity.
+- **Hitscan Hyperlight** over its receiver (3770:0200) and on the cable (3770:0100):
+  the same 17-byte frame the Pulsar / ATK / VXE mice use, from @sopparus's captures, notes and
+  Linux reader ([sopparus/hitscan-battery](https://github.com/sopparus/hitscan-battery)).
+  Unverified: no Hyperlight was on hand, so [#105](https://github.com/HeyOkay/HaloBattery/issues/105)
+  will confirm.
+
 ### Changed
 - New tray menu in the Windows 11 style: Segoe UI Variable text, Fluent icons, an acrylic
   (blurred, translucent) background, rounded corners on Windows 11 and the light or dark
@@ -26,8 +98,15 @@ and the project follows [Semantic Versioning](https://semver.org/).
   in the settings file to get the classic Windows menu back.
 - **Poll interval** and **Low battery alert** are now − / + counters in Preferences; the
   menu stays open while you change them, and the mouse wheel works on them too.
+- The top of the tray menu shows the device's name on one line and its level,
+  charging state and time left on the line below. A long name or state wraps onto
+  more lines instead of making the whole menu wider. A small pencil at the right of the
+  name renames the device; it replaces the Rename item (the classic menu keeps it).
 
 ### Fixed
+- Notifications were titled "Python" instead of the app's name: the app now sets its
+  own app id and registers the name "HaloBattery" (and its icon) for the notification
+  header, per user, no admin rights.
 - The menu text was small and blurry on displays scaled above 100 %: the app is now DPI
   aware, so the menu and the tray icons are drawn at the display's real resolution.
 - PS4 / PS5 controllers over Bluetooth stopped working in some games (DirectInput, for
@@ -37,6 +116,79 @@ and the project follows [Semantic Versioning](https://semver.org/).
   a game has already switched the controller, and the icon shows no level otherwise.
   **Preferences > PlayStation full mode (Bluetooth)** brings the old behaviour back for
   those who do not play such games. USB is unchanged.
+- Audeze Maxwell: no more "Low battery, 0% left" when the headset is switched on. Right
+  after power-on it reports 0% for a moment (measured on an Xbox dongle: 0%, then the real
+  80% a poll later). A 0% in the first 90 seconds is now shown as "battery level not
+  reported yet", and the app re-checks every 3 seconds until the real level arrives
+  instead of waiting a full poll interval. After 90 seconds 0% is believed.
+- A Razer mouse could show "no link (off or asleep)" while in use, when Synapse or other
+  RGB software was sending lighting frames to it (#108). Every reply the app read was an
+  answer to the other app, and the app took that as a success without a level. It now
+  asks again up to three times, keeps the last level greyed out, and the diagnostics say
+  that another app is using the device.
+- An Xbox controller over Bluetooth could show a wrong "10%" when **Windows Bluetooth
+  devices** was off (#97, #108). Windows.Gaming.Input reports 100 of 1000 for it, and the
+  app did not always see that the controller is on Bluetooth. The product ids that Xbox
+  controllers use only over Bluetooth (from SDL) now say so, and the icon asks you to turn
+  on **Windows Bluetooth devices** for the real level.
+- An 8BitDo Ultimate controller on its dock's 2.4 GHz dongle showed "on cable, charging"
+  while it was off the dock and off the cable (#110). The dongle tells XInput that the
+  controller is wired, but Windows.Gaming.Input says that its battery is discharging. The
+  app now believes the second: no "charging", and the icon shows no level, because the
+  dongle does not report a real one (it always says 100%).
+- **A device list that hidapi returned incomplete is no longer cached for the rest of the
+  session.** `hidlist.enumerate()` caches its result against the set of HID paths, and only
+  re-reads when that set changes - but hidapi *opens* every device it lists, so a collection it
+  could not open at that moment is simply missing from the result, with the path set unchanged.
+  The short list was then served from the cache indefinitely: measured on this machine, 9 of 10
+  present collections came back for 5 calls in a row with a single hidapi call, and only an
+  unplug cleared it. A result with fewer entries than the vendor has present interfaces is now
+  re-read, at most once every `SHORT_RETRY` (30 s) so that a permanently unopenable collection
+  cannot turn every call into a full enumeration. Reported by @ahmedkhursheed23 in
+  [#62](https://github.com/HeyOkay/HaloBattery/issues/62).
+- **The Bluetooth watcher now notices a stalled PowerShell instead of pretending to be
+  healthy.** Its output was read with `for line in proc.stdout`, which parks forever on a child
+  that has wedged inside a WinRT call: no snapshot arrives, `failed` stays False, `running()`
+  keeps answering True, and the app never falls back to its once-a-minute polling. The child is
+  read through a queue with a watchdog now (the script's slowest cadence is a snapshot every
+  60 s, so 180 s of silence is a fault); it is killed and restarted, and two stalls in a row make
+  the watcher give up so the fallback happens. Reported by @ahmedkhursheed23 in
+  [#62](https://github.com/HeyOkay/HaloBattery/issues/62).
+- **A "PA" headset (BlackShark V2 Pro 2023, Barracuda) that is switched off costs one probe per
+  poll instead of one per collection.** `_poll_pa` remembered the collection that answered, but
+  only on a success, so a headset that had been off since the app started had nothing remembered
+  and every poll walked all of its vendor collections (~0.7 s each).
+  The obvious fix - remember whichever collection reports "no reading" - would pin a *wrong*
+  collection, because `read_battery`'s `offline` covers two different situations: the interface
+  opened but never accepted a single command (which is exactly what a wrong collection looks
+  like), and the interface accepted a command while the headset did not answer (the right
+  collection, headset off). `read_battery` now says which of the two it is, and only the second
+  is remembered. A switched-off headset still shows "no link" rather than losing its icon, and a
+  headset switched on afterwards is still found. Reported by @ahmedkhursheed23 in
+  [#62](https://github.com/HeyOkay/HaloBattery/issues/62).
+- HyperX Cloud III Wireless: a dongle that takes the battery request only as a feature
+  report ("Incorrect function" on a normal write) showed no level. The app now notices
+  the refused write and sends the request as a feature report, as intended.
+- Razer Barracuda Pro: while the headset was off, each poll waited about 4 seconds longer
+  than needed and held back the icons of all other devices. The app now stops asking as
+  soon as the headset does not answer, and it retries when the receiver refuses a command.
+- Two PS4 / PS5 controllers of the same model on USB showed only one icon, with the
+  level of one of them. Each controller now has its own icon. A single controller on
+  USB keeps its icon, name and hidden setting.
+- A Razer mouse plugged in by cable while its receiver stayed in showed two icons: the
+  cable (charging) and a greyed copy from the receiver for 5 minutes. The greyed copy
+  now goes away while the same model answers on the cable.
+- A device used over Bluetooth lost its battery level when its USB receiver was also
+  plugged in (for example a Razer Barracuda Pro, or a mouse switched to its Bluetooth
+  channel): the Bluetooth reading was hidden as a duplicate and only the grey "no link"
+  icon of the receiver was left. The Bluetooth reading is now hidden only while the
+  receiver actually reads the device.
+- Tray menu: the item under the mouse was not highlighted. Opening the menu brings it to
+  the front, and its acrylic background then hid the highlight window behind it. The
+  highlight is now put in front of the menu each time it is shown.
+- The tray menu or one of its submenus could open behind the taskbar when the work area
+  includes the taskbar: with an auto-hide taskbar, or over a full screen game after the
+  Windows key brings the taskbar up. The menus now leave the taskbar's rectangle out.
 
 ## [1.12.0] - 2026-09-28
 
@@ -638,7 +790,8 @@ First public release.
   in or unplugged.
 - Settings and the autostart entry are migrated from the app's earlier name, Battery Tray.
 
-[Unreleased]: ../../compare/v1.12.0...HEAD
+[Unreleased]: ../../compare/v1.13.0...HEAD
+[1.13.0]: ../../compare/v1.12.0...v1.13.0
 [1.12.0]: ../../compare/v1.11.0...v1.12.0
 [1.11.0]: ../../compare/v1.10.1...v1.11.0
 [1.10.1]: ../../compare/v1.10.0...v1.10.1

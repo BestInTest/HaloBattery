@@ -9,9 +9,11 @@ Supported:
     GG not needed)
   * MCHOSE (M7 Ultra and the rest of the 0x5253 family, on the 2.4 GHz receiver)
   * HyperX (Cloud II and Cloud III Wireless), JBL Quantum 910, Corsair, Astro A50 Gen 5,
-    Keychron, Lofree, Pulsar / ATK / VXE, ASUS ROG / TUF, G-Wolves and LAMZU Maya X mice
+    Keychron, Lofree, Pulsar / ATK / VXE, ASUS ROG / TUF, G-Wolves, LAMZU Maya X and AM Infinity 8K mice
   * Xbox-compatible controllers (Windows.Gaming.Input / XInput)
   * PlayStation controllers (DualShock 4, DualSense): directly over USB/HID
+  * 8BitDo controllers in D-input mode (Pro 2, Pro 3, SN30 / SF30 Pro), while Steam
+    or a game has them in the enhanced mode (never switched by the app, #101)
   * Nintendo Switch Pro Controller and Joy-Con over Bluetooth
   * Bluetooth devices whose battery level Windows knows (enabled from the menu)
 
@@ -34,7 +36,7 @@ from typing import Dict, List, Optional, Set
 
 APP_NAME = "HaloBattery"
 APP_TITLE = "Halo Battery"
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 LEGACY_NAME = "BatteryTray"      # the app's previous name (settings and autostart are migrated)
 
 if getattr(sys, "frozen", False):
@@ -49,6 +51,8 @@ os.makedirs(DATA_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
 LOG_PATH = os.path.join(DATA_DIR, "halo_battery.log")
 DIAG_PATH = os.path.join(DATA_DIR, "diagnostics.txt")
+HISTORY_PATH = os.path.join(DATA_DIR, "history.json")
+STATUS_PATH = os.path.join(DATA_DIR, "status.json")
 
 log = logging.getLogger("halo_battery")
 log.setLevel(logging.INFO)
@@ -64,13 +68,15 @@ import pystray  # noqa: E402
 from pystray import Menu, MenuItem as Item  # noqa: E402
 
 import flyout  # noqa: E402
+import history  # noqa: E402
 import icons  # noqa: E402
 import updates  # noqa: E402
 import winevents  # noqa: E402
 from providers import hidlist  # noqa: E402
-from providers import (AstroProvider, AsusProvider, AudezeProvider,  # noqa: E402
-                       BarracudaProvider, BluetoothProvider, CorsairProvider, DeviceStatus,
-                       GWolvesProvider, HyperXCloud3Provider, HyperXProvider, JblProvider,
+from providers import (AmInfinityProvider, AstroProvider, AsusProvider,  # noqa: E402
+                       AudezeProvider, BarracudaProvider, BluetoothProvider, CorsairProvider, DeviceStatus,
+                       EightBitDoProvider,
+                       GWolvesProvider, HyperXAlpha2Provider, HyperXCloud3Provider, HyperXProvider, JblProvider,
                        KeychronProvider, LamzuProvider, LofreeProvider, LogitechProvider,
                        MchoseProvider, NintendoProvider, PlayStationProvider, PulsarProvider,
                        RazerProvider, SteelSeriesProvider, WLmouseProvider, XInputProvider)
@@ -98,7 +104,51 @@ DEFAULTS = {
     # battery. Off by default: that mode stays on until the controller is turned off and
     # games that use DirectInput stop seeing the controller (#96)
     "playstation_full_mode": False,
+    "disabled_providers": [],     # provider names turned off in Preferences > Device types
+    "time_left": True,      # "about N h of use left" in the tooltip (history.py)
+    "percent_in_icon": False,  # the level as a number in the ring, instead of the pictogram
+    "quiet_fullscreen": True,  # while a game is full screen: hold alerts, poll every 5 min
+    "status_file": False,      # write status.json for Rainmeter, Stream Deck, scripts
 }
+
+# Preferences > Device types: provider name -> what the user sees. Windows Bluetooth
+# devices keep their own switch ("bluetooth" above), as before.
+PROVIDER_LABELS = {
+    "8bitdo": "8BitDo controllers",
+    "am_infinity": "AM Infinity 8K (Angry Miao)",
+    "astro": "Astro A50",
+    "asus": "ASUS ROG / TUF mice",
+    "audeze": "Audeze Maxwell",
+    "barracuda": "Razer Barracuda Pro",
+    "corsair": "Corsair headsets",
+    "gwolves": "G-Wolves mice",
+    "hyperx": "HyperX Cloud II Wireless",
+    "hyperx_alpha2": "HyperX Cloud Alpha 2",
+    "hyperx_cloud3": "HyperX Cloud III Wireless",
+    "jbl": "JBL Quantum",
+    "keychron": "Keychron",
+    "lamzu": "LAMZU mice",
+    "lofree": "Lofree keyboards",
+    "logitech": "Logitech",
+    "mchose": "MCHOSE mice",
+    "nintendo": "Nintendo Switch controllers",
+    "playstation": "PlayStation controllers",
+    "pulsar": "Pulsar / ATK VXE mice",
+    "razer": "Razer mice and headsets",
+    "steelseries": "SteelSeries",
+    "wlmouse": "WLmouse",
+    "xinput": "Xbox-compatible controllers",
+}
+
+
+def make_providers() -> list:
+    return [RazerProvider(), AudezeProvider(), WLmouseProvider(), MchoseProvider(),
+            HyperXAlpha2Provider(), HyperXCloud3Provider(), HyperXProvider(),
+            KeychronProvider(), PulsarProvider(),
+            JblProvider(), LogitechProvider(), SteelSeriesProvider(), XInputProvider(),
+            PlayStationProvider(), EightBitDoProvider(), BarracudaProvider(), NintendoProvider(),
+            AsusProvider(), GWolvesProvider(), LofreeProvider(), AstroProvider(), CorsairProvider(),
+            LamzuProvider(), AmInfinityProvider()]
 
 
 # ---------------------------------------------------------------- config
@@ -181,6 +231,23 @@ def save_config(cfg: dict) -> None:
                 pass
 
 
+# ------------------------------------------------------------ status file
+def write_json(path: str, data: dict) -> None:
+    """Write to a temporary file and swap it in, so a reader (Rainmeter reads the
+    status file every few seconds) never sees half a file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def remove_status_file() -> None:
+    try:
+        os.remove(STATUS_PATH)
+    except OSError:
+        pass
+
+
 # ------------------------------------------------------------- autostart
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
@@ -209,6 +276,70 @@ def running_from_temp() -> bool:
             if me.startswith(d + os.sep):
                 return True
     return False
+
+
+# The texts of the app's notifications.
+def low_battery_text(name: str, level: Optional[int], approx: bool) -> str:
+    left = "battery is low" if approx else f"{level}% left"
+    return f"{name}: {left}. Time to charge."
+
+
+def fully_charged_text(name: str) -> str:
+    return f"{name} is fully charged."
+
+
+def update_text(latest: str) -> str:
+    return (f"Version {latest} is available. Right-click a battery icon "
+            f"and choose \"Download v{latest}…\".")
+
+
+# Windows titles a notification with the app that sent it. Without an id of its own the
+# process is "Python" (pythonw.exe) - that is what the notifications said. The id is set
+# for the process at start-up and registered under HKCU with the name (and icon) to show
+# in the notification header; nothing needs admin rights.
+APP_ID = "HaloBattery"
+APP_ID_NAME = "HaloBattery"
+APP_ID_KEY = "Software\\Classes\\AppUserModelId\\" + APP_ID
+APP_ICON_PATH = os.path.join(DATA_DIR, "notification_icon.png")
+
+
+def app_icon_png(path: str) -> bool:
+    """The app icon (the same drawing as halo.ico) as a PNG for the notification header."""
+    try:
+        from PIL import Image, ImageDraw
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        size, ss = 64, 4
+        big = size * ss
+        img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+        ImageDraw.Draw(img).ellipse((0, 0, big - 1, big - 1), fill=(32, 32, 32, 255))
+        ring = icons.render(75, True, True, 20, light_taskbar=False, badge="")
+        ring = ring.resize((int(big * 0.84),) * 2, Image.LANCZOS)
+        off = (big - ring.width) // 2
+        img.alpha_composite(ring, (off, off))
+        img.resize((size, size), Image.LANCZOS).save(path)
+        return True
+    except Exception as e:
+        log.warning("notification icon: %s", e)
+        return False
+
+
+def set_app_id() -> None:
+    """Name the notifications "HaloBattery" instead of "Python"."""
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, APP_ID_KEY) as k:
+            winreg.SetValueEx(k, "DisplayName", 0, winreg.REG_SZ, APP_ID_NAME)
+            if app_icon_png(APP_ICON_PATH):
+                winreg.SetValueEx(k, "IconUri", 0, winreg.REG_SZ, APP_ICON_PATH)
+    except OSError as e:
+        log.warning("app id registration: %s", e)
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except (OSError, AttributeError) as e:
+        log.warning("app id: %s", e)
 
 
 TEMP_AUTOSTART_TEXT = ("Halo Battery is running from a temporary folder (straight from the ZIP). "
@@ -297,6 +428,26 @@ def single_instance() -> bool:
     import ctypes
     ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\HaloBattery_single_instance")
     return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+
+
+# SHQueryUserNotificationState: what Windows itself uses to hold back notifications.
+# 2 = a full-screen app (a borderless game too), 3 = a Direct3D exclusive full-screen
+# game, 4 = presentation mode. 5 = normal; 1, 6 and 7 are not about the screen.
+QUNS_FULLSCREEN = (2, 3, 4)
+QUIET_INTERVAL = 300       # s between polls while a game is full screen
+
+
+def fullscreen_app_running() -> bool:
+    if sys.platform != "win32":
+        return False
+    import ctypes
+    state = ctypes.c_int(0)
+    try:
+        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
+            return False
+    except (AttributeError, OSError):
+        return False
+    return state.value in QUNS_FULLSCREEN
 
 
 # ------------------------------------------------------------- tray icons
@@ -509,9 +660,13 @@ def drop_bluetooth_duplicates(results: List[DeviceStatus],
     Bluetooth is covered at all: the vendor collection the provider needs does not
     exist over Bluetooth.
     """
-    # controllers are left to dedupe_controllers(): for them the Bluetooth value wins
+    # controllers are left to dedupe_controllers(): for them the Bluetooth value wins.
+    # Only a live HID reading counts: a receiver whose device is not linked (no level)
+    # or a greyed-out last value (not online) means the device is elsewhere, often on
+    # Bluetooth right now, and dropping that live copy left only the grey icon
     hid = [device_family(st.name) for st in results
-           if not st.key.startswith("bt:") and st.source not in ("bluetooth", "xinput")]
+           if not st.key.startswith("bt:") and st.source not in ("bluetooth", "xinput")
+           and st.online and st.level is not None]
     kept: List[DeviceStatus] = []
     for st in results:
         if st.key.startswith("bt:") or st.source == "bluetooth":
@@ -534,8 +689,15 @@ def drop_bluetooth_duplicates(results: List[DeviceStatus],
     return kept
 
 
-def describe(st: DeviceStatus, name: Optional[str] = None) -> str:
-    """The tooltip text. `name` replaces the device's own name (set with "Rename...")."""
+def describe(st: DeviceStatus, name: Optional[str] = None, left: str = "") -> str:
+    """The tooltip text. `name` replaces the device's own name (set with "Rename..."),
+    `left` is the estimated time left ("about 5 h of use left"), shown only while the
+    device is awake and on battery."""
+    return f"{name or st.name}: {device_state(st, left)}"
+
+
+def device_state(st: DeviceStatus, left: str = "") -> str:
+    """The part of describe() after the name: "85%, charging", "no link ..."."""
     if st.approx:
         state = st.approx          # XInput: coarse levels or "not reported yet", never a fake "NN%"
     elif st.level is None:
@@ -546,7 +708,9 @@ def describe(st: DeviceStatus, name: Optional[str] = None) -> str:
             state += ", charging"
         if not st.online:
             state += " (last known value, device asleep)"
-    return f"{name or st.name}: {state}"
+        elif left and not st.charging:
+            state += f", {left}"
+    return state
 
 
 # ------------------------------------------------------------- hide / rename
@@ -613,8 +777,12 @@ class DeviceIcon:
         badge = self.app.pictogram(st) if self.app.cfg["badges"] else ""
         animate = (self.app.cfg["animation"] and st.charging and st.online
                    and st.level is not None)
-        state = (st.level, st.charging, st.online, self.app.cfg["low"],
-                 self.app.light_taskbar, badge, animate)
+        # the number replaces the pictogram; a device that only reports rough steps
+        # (st.approx) keeps its pictogram rather than showing a made-up exact number
+        text = (str(st.level) if self.app.cfg.get("percent_in_icon") and st.level is not None
+                and not st.approx else "")
+        state = (st.level, st.charging, st.online, self.app.low_for(st),
+                 self.app.light_taskbar, badge, animate, text)
         if state != self._state:
             self._state = state
             art = self._art(state)
@@ -624,7 +792,7 @@ class DeviceIcon:
             else:
                 self.frames = None
                 self.icon.icon = art
-        title = describe(st, self.app.display_name(st))
+        title = describe(st, self.app.display_name(st), self.app.time_left_text(st))
         # the tray tooltip is limited to 127 characters
         if self.icon.title != title[:127]:
             self.icon.title = title[:127]
@@ -648,13 +816,13 @@ class DeviceIcon:
         icon switches without rendering anything."""
         if state not in self._images:
             self._images.clear()
-            level, charging, online, low, light, badge, animate = state
+            level, charging, online, low, light, badge, animate, text = state
             for lt in (light, not light):
                 if animate:
-                    art = icons.charging_frames(level, online, low, lt, badge)
+                    art = icons.charging_frames(level, online, low, lt, badge, text=text)
                 else:
-                    art = icons.render(level, charging, online, low, lt, badge)
-                self._images[(level, charging, online, low, lt, badge, animate)] = art
+                    art = icons.render(level, charging, online, low, lt, badge, text=text)
+                self._images[(level, charging, online, low, lt, badge, animate, text)] = art
         return self._images[state]
 
     def tick(self, i: int) -> None:
@@ -685,12 +853,12 @@ class App:
         self.theme_evt = threading.Event()   # "re-check the icon colour now"
         self.win_events: Optional[winevents.WindowEventWatcher] = None
         self.light_taskbar = self.compute_light()
-        self.providers = [RazerProvider(), AudezeProvider(), WLmouseProvider(), MchoseProvider(),
-                          HyperXCloud3Provider(), HyperXProvider(), KeychronProvider(), PulsarProvider(),
-                          JblProvider(), LogitechProvider(), SteelSeriesProvider(), XInputProvider(),
-                          PlayStationProvider(), BarracudaProvider(), NintendoProvider(), AsusProvider(),
-                          GWolvesProvider(), LofreeProvider(), AstroProvider(), CorsairProvider(),
-                          LamzuProvider()]
+        self.providers = make_providers()
+        self.key_provider: Dict[str, str] = {}   # device key -> provider name
+        self.history = history.History(HISTORY_PATH)
+        self.history.load()
+        self.held: Dict[tuple, tuple] = {}      # (key, title) -> (text, title), held while quiet
+        self.was_quiet = False
         self.bt = BluetoothProvider()
         self.icons: Dict[str, DeviceIcon] = {}
         self.placeholder: Optional[pystray.Icon] = None
@@ -716,11 +884,17 @@ class App:
 
     # ---------------- menu
     def build_menu(self, owner: Optional[DeviceIcon]) -> Menu:
-        def header_text(_item):
+        # the flyout shows the state on the line below the name (flyout.HeaderItem)
+        def header_title():
             if owner and owner.status:
-                return describe(owner.status, self.display_name(owner.status))
+                return self.display_name(owner.status) or owner.status.name
             hidden = len(self._settings_map("hidden"))
             return f"No devices shown ({hidden} hidden)" if hidden else "No devices found"
+
+        def header_detail():
+            if owner and owner.status:
+                return device_state(owner.status, self.time_left_text(owner.status))
+            return ""
 
         def set_interval(sec):
             self.cfg["interval"] = sec
@@ -746,6 +920,8 @@ class App:
                     else:
                         self.update = None
                         self.refresh_menus()
+                if key == "status_file" and not self.cfg[key]:
+                    remove_status_file()        # no stale levels left behind for other apps
                 self.wake.set()
             return _f
 
@@ -786,6 +962,27 @@ class App:
             # pystray accepts only actions with 0-2 parameters, so no "k=key" default here
             return lambda icon, item: self.unhide(key)
 
+        def device_low_picked(value):
+            return lambda _item: bool(owner and owner.status) and (
+                self.device_low(owner.status.key) == value)
+
+        def pick_device_low(value):
+            return lambda icon, item: self.set_device_low(owner, value)
+
+        def default_low_text(_item):
+            low = self.cfg["low"]
+            return f"Default ({low}%)" if low else "Default (off)"
+
+        def provider_on(name):
+            return lambda _item: name not in self.disabled_providers()
+
+        def flip_provider(name):
+            return lambda icon, item: self.toggle_provider(name)
+
+        def provider_items():
+            for name, label in sorted(PROVIDER_LABELS.items(), key=lambda kv: kv[1].lower()):
+                yield Item(label, flip_provider(name), checked=provider_on(name))
+
         def hidden_items():
             # built each time the menu opens, so it always shows the current list
             hidden = self._settings_map("hidden")
@@ -794,10 +991,15 @@ class App:
 
         # items for the device of this icon only (the "no devices" icon has none)
         device_items = [
-            Item("Rename…", lambda i, it: self.rename(owner)),
+            # the flyout has the pencil next to the name instead
+            flyout.classic_only(Item("Rename…", lambda i, it: self.rename(owner))),
             Item("Reset name", lambda i, it: self.reset_name(owner), visible=renamed),
             Item("Icon", Menu(*[Item(label, pick(value), checked=picked(value), radio=True)
                                 for value, label in PICTOGRAM_CHOICES])),
+            Item("Low battery alert at", Menu(
+                Item(default_low_text, pick_device_low(None), checked=device_low_picked(None), radio=True),
+                *[Item(t, pick_device_low(p), checked=device_low_picked(p), radio=True)
+                  for p, t in lows])),
             Item("Hide this device", lambda i, it: self.hide(owner)),
         ] if owner is not None else []
 
@@ -808,6 +1010,10 @@ class App:
             flyout.CounterItem("Low battery alert", lows, lambda: self.cfg["low"], set_low),
             Item("Alert when fully charged", toggle("full_alert"),
                  checked=lambda it: self.cfg.get("full_alert", True)),
+            Item("Estimated time left", toggle("time_left"),
+                 checked=lambda it: self.cfg.get("time_left", True)),
+            Item("Quiet while gaming", toggle("quiet_fullscreen"),
+                 checked=lambda it: self.cfg.get("quiet_fullscreen", True)),
             Menu.SEPARATOR,
             Item("Windows Bluetooth devices", toggle("bluetooth"),
                  checked=lambda it: self.cfg["bluetooth"]),
@@ -816,14 +1022,19 @@ class App:
             # survive until the controller is turned off and on (#96)
             Item("PlayStation full mode (Bluetooth)", toggle("playstation_full_mode"),
                  checked=lambda it: self.cfg.get("playstation_full_mode", False)),
+            Item("Device types", Menu(provider_items)),
             Item("Device pictogram", toggle("badges"),
                  checked=lambda it: self.cfg["badges"]),
+            Item("Percentage in the icon", toggle("percent_in_icon"),
+                 checked=lambda it: self.cfg.get("percent_in_icon", False)),
             Item("Charging animation", toggle("animation"),
                  checked=lambda it: self.cfg["animation"]),
             Item("Icon colour", Menu(*[
                 Item(t, set_theme(m), checked=lambda it, m=m: self.cfg.get("icon_theme", "auto") == m, radio=True)
                 for m, t in themes])),
             Menu.SEPARATOR,
+            Item("Status file for other apps", toggle("status_file"),
+                 checked=lambda it: self.cfg.get("status_file", False)),
             Item("Start with Windows", toggle_autostart,
                  checked=lambda it: autostart_enabled()),
             Item("Check for updates", toggle("update_check"),
@@ -831,7 +1042,8 @@ class App:
         )
 
         return Menu(
-            Item(header_text, None, enabled=False),
+            flyout.HeaderItem(header_title, header_detail,
+                              edit=(lambda icon: self.rename(owner)) if owner is not None else None),
             Item(update_text, lambda i, it: self.open_update(),
                  visible=lambda it: self.update is not None),
             *device_items,
@@ -944,6 +1156,81 @@ class App:
         owner.update(owner.status)            # redraw at once
         self.refresh_menus()
 
+    # ---------------- low battery alert per device
+    def device_low(self, key: str) -> Optional[int]:
+        """The alert level set for this device only, or None to follow Preferences.
+        A value that is not a whole number 0..100 (a hand-edited settings file) is ignored."""
+        value = self._settings_map("lows").get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 100:
+            return value
+        return None
+
+    def low_for(self, st: DeviceStatus) -> int:
+        """The low battery level of this device: its own, or the one in Preferences."""
+        own = self.device_low(st.key)
+        return self.cfg["low"] if own is None else own
+
+    def set_device_low(self, owner: Optional[DeviceIcon], value: Optional[int]) -> None:
+        """"Low battery alert at" in the device menu: None goes back to the default."""
+        if owner is None or owner.status is None:
+            return
+        key = owner.status.key
+        with self.lock:
+            lows = self._settings_map("lows")
+            if value is None:
+                lows.pop(key, None)
+            else:
+                lows[key] = value
+            save_config(self.cfg)
+            self.alerted.pop(key, None)       # the new level may alert at once
+        log.info("low battery alert of [%s]: %s", key, "default" if value is None else f"{value}%")
+        owner.update(owner.status)            # the ring turns red at the new level
+        self.refresh_menus()
+
+    # ---------------- device types
+    def disabled_providers(self) -> Set[str]:
+        """Providers turned off in Preferences > Device types. A value that is not a
+        list (a hand-edited settings file) counts as none turned off."""
+        value = self.cfg.get("disabled_providers")
+        if not isinstance(value, list):
+            return set()
+        return {v for v in value if isinstance(v, str)}
+
+    def toggle_provider(self, name: str) -> None:
+        """Turn one device type on or off. Off, its devices are not opened at all, and
+        their icons go away at once rather than after the next two polls."""
+        with self.lock:
+            off = self.disabled_providers()
+            if name in off:
+                off.discard(name)
+                gone = []
+            else:
+                off.add(name)
+                gone = [k for k, p in self.key_provider.items() if p == name]
+            self.cfg["disabled_providers"] = sorted(off)
+            save_config(self.cfg)
+            stopped = []
+            for key in gone:
+                ic = self.icons.pop(key, None)
+                self.missing.pop(key, None)
+                self.alerted.pop(key, None)
+                if ic is not None:
+                    stopped.append(ic)
+        log.info("device type %s: %s", name, "off" if name in off else "on")
+        for ic in stopped:
+            # stop the icon from another thread: this runs in an icon's own menu callback
+            threading.Thread(target=ic.stop, daemon=True).start()
+        self.refresh_menus()
+        self.wake.set()
+
+    # ---------------- time left
+    def time_left_text(self, st: DeviceStatus) -> str:
+        """"about 5 h of use left", or "" when turned off or not known yet."""
+        if not self.cfg.get("time_left", True) or st.approx:
+            return ""
+        seconds = self.history.seconds_left(st.key, st.level)
+        return history.format_left(seconds) if seconds is not None else ""
+
     # ---------------- icon colour
     def compute_light(self) -> bool:
         """True when the icons should be drawn for a light bar (black icons).
@@ -1051,6 +1338,18 @@ class App:
         lines += [f"renamed by the user: {n}   [{k}]" for k, n in names.items()]
         lines += [f"icon picked by the user: {v}   [{k}]"
                   for k, v in self._settings_map("icons").items()]
+        lines += [f"low battery alert set by the user: {v}%   [{k}]"
+                  for k, v in self._settings_map("lows").items()]
+        disabled = self.disabled_providers()
+        if disabled:
+            lines.append("device types turned off: " + ", ".join(sorted(disabled)))
+        lines.append(f"quiet while gaming: {'on' if self.cfg.get('quiet_fullscreen', True) else 'off'}, "
+                     f"full-screen app in front now: {fullscreen_app_running()}, "
+                     f"{len(self.held)} notification(s) held")
+        lines.append("status file: " + (STATUS_PATH if self.cfg.get("status_file") else "off"))
+        lines.append("")
+        lines.append("=== Battery history (time left) ===")
+        lines += self.history.report()
         lines.append("")
         lines.append("=== Icon colour ===")
         lines.append(f"mode: {self.cfg.get('icon_theme', 'auto')}, icons drawn for a "
@@ -1068,7 +1367,8 @@ class App:
                      + ("on (the app switches the controller)" if self.cfg.get("playstation_full_mode")
                         else "off (listen only)"))
         for p in self.providers + ([self.bt] if self.cfg["bluetooth"] else []):
-            lines += p.diagnostics()
+            if p.name not in disabled:
+                lines += p.diagnostics()
         lines.append("")
         lines.append("=== All HID devices ===")
         lines += dump_hid()
@@ -1092,13 +1392,20 @@ class App:
     # ---------------- polling
     def poll_once(self) -> List[DeviceStatus]:
         results: List[DeviceStatus] = []
+        disabled = self.disabled_providers()
         for p in self.providers:
+            if p.name in disabled:
+                continue          # turned off in Preferences > Device types: not opened at all
             if isinstance(p, PlayStationProvider):
                 p.switch_bluetooth = bool(self.cfg.get("playstation_full_mode", False))
             try:
-                results += p.poll()
+                found = p.poll()
             except Exception:
                 log.exception("provider %s", p.name)
+                continue
+            for st in found:
+                self.key_provider[st.key] = p.name
+            results += found
         if self.cfg["bluetooth"]:
             # Bluetooth is polled in its own thread (bt_loop); only the cache is used here
             bt = list(self.bt_cache)
@@ -1153,10 +1460,13 @@ class App:
     def apply(self, results: List[DeviceStatus]):
         seen = set()
         hidden = self._settings_map("hidden")
+        now = time.time()
         for st in results:
             if st.key in hidden:
                 continue          # hidden by the user: no icon and no low battery alert
             seen.add(st.key)
+            self.history.record(st.key, st.level, st.charging, st.online, now,
+                                coarse=bool(st.approx))
             self.missing.pop(st.key, None)
             ic = self.icons.get(st.key)
             if ic is None:
@@ -1183,6 +1493,7 @@ class App:
                     self.missing.pop(key, None)
 
         self.show_placeholder(not self.icons)
+        self.history.save()
 
     def show_placeholder(self, show: bool) -> None:
         """The "no devices" icon. It is made once and after that only shown or hidden.
@@ -1214,7 +1525,7 @@ class App:
                 log.warning("tray: %s", e)
 
     def check_alert(self, ic: DeviceIcon, st: DeviceStatus):
-        low = self.cfg["low"]
+        low = self.low_for(st)
         if not low or st.level is None or not st.online:
             return
         if st.charging or st.level > low + 5:
@@ -1223,8 +1534,9 @@ class App:
         if st.level <= low and not self.alerted.get(st.key):
             self.alerted[st.key] = True
             try:
-                left = "battery is low" if st.approx else f"{st.level}% left"
-                ic.icon.notify(f"{self.display_name(st)}: {left}. Time to charge.", "Low battery")
+                self.notify(ic.icon, st.key,
+                            low_battery_text(self.display_name(st), st.level, bool(st.approx)),
+                            "Low battery")
             except Exception as e:
                 log.warning("notify: %s", e)
 
@@ -1241,7 +1553,8 @@ class App:
         prev = self.full_state.get(st.key)
         if st.level >= 100 and prev == "charging" and self.cfg.get("full_alert", True):
             try:
-                ic.icon.notify(f"{self.display_name(st)} is fully charged.", "Fully charged")
+                self.notify(ic.icon, st.key, fully_charged_text(self.display_name(st)),
+                            "Fully charged")
             except Exception as e:
                 log.warning("notify: %s", e)
         if st.level >= 100:
@@ -1261,6 +1574,16 @@ class App:
                 self.apply(results)
             except Exception:
                 log.exception("apply")
+            quiet = self.quiet()
+            if quiet != self.was_quiet:
+                self.was_quiet = quiet
+                log.info("full-screen app %s", "in front: quiet" if quiet else "gone")
+            if not quiet and self.held:
+                self.flush_held()
+            try:
+                self.write_status(results)
+            except Exception:
+                log.exception("status file")
             if self.diag_requested.is_set():
                 self.diag_requested.clear()
                 try:
@@ -1294,8 +1617,9 @@ class App:
         plus XInput controller slots (a controller switched on behind a receiver
         that stays plugged in does not change the HID list)."""
         xs = None
+        disabled = self.disabled_providers()
         for p in self.providers:
-            if isinstance(p, XInputProvider):
+            if isinstance(p, XInputProvider) and p.name not in disabled:
                 try:
                     xs = p.connected_slots()
                 except Exception:
@@ -1306,10 +1630,16 @@ class App:
         """Wait for the next scheduled poll, but wake up early when a device is
         plugged in, unplugged, switched on or off."""
         interval = self.cfg["interval"]
-        if any(getattr(p, "pending", False) for p in self.providers):
+        disabled = self.disabled_providers()
+        if any(getattr(p, "pending", False) for p in self.providers if p.name not in disabled):
             interval = min(interval, 3)   # a new controller has no battery info yet: re-check soon
         if any(self.missing.values()):
             interval = min(interval, 3)   # a device just went missing: confirm quickly instead of in a minute
+        quiet = self.quiet()
+        if quiet:
+            # a game is full screen: every poll talks to the devices, so do it rarely.
+            # Plugging something in still polls at once (the signature check below)
+            interval = max(self.cfg["interval"], QUIET_INTERVAL)
         deadline = time.time() + interval
         if sig is None:
             sig = self.change_signature()
@@ -1321,6 +1651,8 @@ class App:
             if now != sig:
                 time.sleep(1.0)          # give Windows time to finish setting up the device
                 return
+            if quiet and not self.quiet():
+                return                   # the game is closed: poll now and show what was held
 
     def anim_loop(self):
         """Advances the "breathing" frames of charging devices; other icons are left alone."""
@@ -1342,14 +1674,74 @@ class App:
             except Exception:
                 pass
 
-    def notify_any(self, text: str, title: str) -> None:
+    def notify_any(self, text: str, title: str, key: str = "") -> None:
         """A tray notification from whichever icon is there."""
         icon = next((ic.icon for ic in list(self.icons.values())), None) or self.placeholder
         if icon is not None:
             try:
-                icon.notify(text, title)
+                self.notify(icon, key, text, title)
             except Exception as e:
                 log.warning("notify: %s", e)
+
+    # ---------------- status file for other apps
+    def status_data(self, results: List[DeviceStatus], running: bool = True) -> dict:
+        """What status.json holds: every device that has an icon, as the tooltip shows
+        it. `running` is false in the file the app leaves behind when it exits."""
+        hidden = self._settings_map("hidden")
+        devices = []
+        for st in results:
+            if st.key in hidden:
+                continue
+            secs = None if st.approx else self.history.seconds_left(st.key, st.level)
+            if st.charging or not st.online:
+                secs = None
+            devices.append({
+                "key": st.key,
+                "name": self.display_name(st),
+                "level": st.level,
+                "charging": st.charging,
+                "online": st.online,
+                "kind": self.pictogram(st),
+                "approx": st.approx or None,
+                "low_alert_at": self.low_for(st),
+                "seconds_left": None if secs is None else int(secs),
+                "text": describe(st, self.display_name(st), self.time_left_text(st)),
+            })
+        now = time.time()
+        return {"app": APP_TITLE, "version": VERSION, "running": running,
+                "updated": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now)),
+                "updated_unix": int(now), "devices": devices}
+
+    def write_status(self, results: List[DeviceStatus]) -> None:
+        if self.cfg.get("status_file"):
+            write_json(STATUS_PATH, self.status_data(results))
+
+    # ---------------- quiet while a game is full screen
+    def quiet(self) -> bool:
+        """True while "Quiet while gaming" is on and a full-screen app is in front."""
+        return bool(self.cfg.get("quiet_fullscreen", True)) and fullscreen_app_running()
+
+    def notify(self, icon, key: str, text: str, title: str) -> None:
+        """Show a notification now, or hold it until the full-screen app is gone. Only
+        the newest one per device and kind is kept, so a long game ends with one
+        "Low battery" per device rather than a pile of them."""
+        if self.quiet():
+            self.held[(key, title)] = (text, title)
+            log.info("held while full screen: %s", text)
+            return
+        icon.notify(text, title)
+
+    def flush_held(self) -> None:
+        """The full-screen app is gone: show what was held, except a low battery alert
+        for a device that has been put on the charger (or topped up) since."""
+        held, self.held = self.held, {}
+        for (key, title), (text, _) in held.items():
+            ic = self.icons.get(key)
+            st = ic.status if ic is not None else None
+            if title == "Low battery" and st is not None and (
+                    st.charging or (st.level is not None and st.level > self.low_for(st))):
+                continue
+            self.notify_any(text, title, key)
 
     def open_update(self) -> None:
         url = self.update[1] if self.update else updates.RELEASES_URL
@@ -1390,14 +1782,19 @@ class App:
             self.refresh_menus()
             if self.cfg.get("update_notified") != latest:
                 self.cfg["update_notified"] = latest
-                self.notify_any(f"Version {latest} is available. Right-click a battery icon "
-                                f"and choose \"Download v{latest}…\".", f"{APP_TITLE} update")
+                self.notify_any(update_text(latest), f"{APP_TITLE} update")
         else:
             self.update = None
         save_config(self.cfg)
 
     def quit(self):
         self.stop_evt.set()
+        self.history.save(force=True)
+        if self.cfg.get("status_file"):
+            try:
+                write_json(STATUS_PATH, self.status_data([], running=False))
+            except OSError as e:
+                log.warning("status file: %s", e)
         self.update_wake.set()
         self.theme_evt.set()
         if self.win_events is not None:
@@ -1459,11 +1856,7 @@ def probe():
             pass
     app = App.__new__(App)
     app.cfg = load_config()
-    app.providers = [RazerProvider(), AudezeProvider(), WLmouseProvider(), MchoseProvider(),
-                     HyperXCloud3Provider(), HyperXProvider(), KeychronProvider(), PulsarProvider(),
-                     JblProvider(), LogitechProvider(), SteelSeriesProvider(), XInputProvider(),
-                     PlayStationProvider(), BarracudaProvider(), NintendoProvider(), AsusProvider(),
-                     GWolvesProvider(), LofreeProvider(), AstroProvider(), CorsairProvider(), LamzuProvider()]
+    app.providers = make_providers()
     app.bt = BluetoothProvider()
     res = []
     for p in app.providers + [app.bt]:
@@ -1491,6 +1884,7 @@ def main():
         return
     if not single_instance():
         return
+    set_app_id()                   # before the tray icons: notifications say "HaloBattery"
     # the app used to be called "Battery Tray": pick up its settings and autostart
     if migrate_legacy_config():
         log.info("settings migrated from %%APPDATA%%\\%s", LEGACY_NAME)

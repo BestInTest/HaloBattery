@@ -166,6 +166,17 @@ class PollTest(unittest.TestCase):
         R.hidlist = types.SimpleNamespace(enumerate=lambda vid=0: list(entries))
         return R.RazerProvider().poll()
 
+    def test_the_blackwidow_answers_through_its_own_collection(self):
+        # The keyboard answers on a control collection that is not a vendor page, so
+        # the probe order (which ranks 0001/ff00 first) must still reach it. The fake's
+        # page 0059 is a stand-in: the unit test only pins that ranking does not filter.
+        e = entry(0x025C, b"kbd", "Razer BlackWidow V3 Pro", iface=3, page=0x0059)
+        mouse = FakeMouse(tid=0x9F, raw_level=0xB5, charging=1)      # 0xB5 -> 71%
+        out = self.poll([e], {b"kbd": mouse})
+        self.assertEqual(len(out), 1)
+        self.assertEqual((out[0].level, out[0].charging), (round(0xB5 / 255 * 100), True))
+        self.assertEqual(mouse.tids[0], 0x9F)
+
 
 # ------------------------------------------------------------------ tests
 class TableTest(unittest.TestCase):
@@ -195,12 +206,25 @@ class TableTest(unittest.TestCase):
         self.assertEqual(R.KNOWN[0x00A7][0], "Razer Naga V2 Pro")
         self.assertEqual(R.KNOWN[0x00A8][0], "Razer Naga V2 Pro")
 
+    def test_the_blackwidow_pro_pair_is_known(self):
+        # OpenRazer lists get_battery/is_charging on both the wired class (0x025A) and,
+        # through inheritance, the wireless model (0x025C); the driver reads them with
+        # transaction id 0x3f and 0x9f respectively.
+        self.assertEqual(R.KNOWN[0x025A], ("Razer BlackWidow V3 Pro", 0x3F))
+        self.assertEqual(R.KNOWN[0x025C], ("Razer BlackWidow V3 Pro", 0x9F))
+
     def test_wired_viper_is_not_in_the_table(self):
         # 0078 is OpenRazer's USB_DEVICE_ID_RAZER_VIPER, a wired mouse with no battery.
         # The Viper Ultimate is 007A / 007B.
         self.assertNotIn(0x0078, R.KNOWN)
         self.assertFalse(R.maybe_wireless(0x0078, "Razer Viper"))
         self.assertTrue(R.maybe_wireless(0x007B, "Razer Viper Ultimate"))
+
+    def test_the_wireless_blackwidow_is_in_the_table(self):
+        # OpenRazer's RazerBlackWidowV3ProWireless (USB_PID 0x025C) lists get_battery
+        # and is_charging in METHODS; the Wired class (0x025A) lists neither.
+        self.assertEqual(R.KNOWN[0x025C][0], "Razer BlackWidow V3 Pro")
+        self.assertIn(R.KNOWN[0x025C][1], R.TRANSACTION_IDS)
 
 
 class PollRazerTest(PollTest):
@@ -240,6 +264,86 @@ class PollRazerTest(PollTest):
         res = self.poll([entry(0x0078, b"if0", "Razer Viper")], {b"if0": mouse})
         self.assertEqual(res, [])
         self.assertEqual(mouse.tids, [])
+
+
+# ------------------------------------------------------------------ receiver + cable
+class AsleepMouse(FakeMouse):
+    """The receiver of a mouse that is not on the radio: status 04 to every request."""
+
+    def reply(self):
+        out = [0x00] + [0] * 90
+        out[1] = R.STATUS_TIMEOUT
+        return out
+
+
+class CableTest(PollTest):
+    """A mouse plugged in by cable while its receiver stays in: the cable shows up as
+    another PID with the same name. The receiver then answers "not responding", and its
+    greyed copy of the old level must not stay next to the live icon of the cable."""
+    RECEIVER = entry(0x007B, b"rx", "Razer Viper Ultimate Dongle")
+    CABLE = entry(0x007A, b"usb", "Razer Viper Ultimate")
+
+    def poll_with(self, provider, entries, mice):
+        bus = FakeBus(mice)
+        R.hid = types.SimpleNamespace(device=bus.device_class())
+        R.hidlist = types.SimpleNamespace(enumerate=lambda vid=0: list(entries))
+        return provider.poll()
+
+    def test_cable_hides_the_greyed_receiver_icon(self):
+        p = R.RazerProvider()
+        out = self.poll_with(p, [self.RECEIVER], {b"rx": FakeMouse(0xFF, raw_level=0x80)})
+        self.assertEqual(len(out), 1)
+        out = self.poll_with(p, [self.RECEIVER, self.CABLE],
+                             {b"rx": AsleepMouse(0xFF), b"usb": FakeMouse(0xFF, charging=1)})
+        self.assertEqual([(s.key, s.online, s.charging) for s in out],
+                         [("razer:007a:000000000000", True, True)])
+
+    def test_receiver_alone_still_keeps_its_greyed_icon(self):
+        p = R.RazerProvider()
+        self.poll_with(p, [self.RECEIVER], {b"rx": FakeMouse(0xFF, raw_level=0x80)})
+        out = self.poll_with(p, [self.RECEIVER], {b"rx": AsleepMouse(0xFF)})
+        self.assertEqual([(s.key, s.online) for s in out], [("razer:007b:000000000000", False)])
+
+    def test_two_live_mice_of_one_model_keep_two_icons(self):
+        # one on the receiver and another one on its cable: both answer
+        out = self.poll([self.RECEIVER, self.CABLE],
+                        {b"rx": FakeMouse(0xFF, raw_level=0x80), b"usb": FakeMouse(0xFF, charging=1)})
+        self.assertEqual(len(out), 2)
+
+    def test_second_receiver_of_one_model_keeps_its_greyed_icon(self):
+        # two receivers of the same PID are two mice, not one mouse on its cable
+        p = R.RazerProvider()
+        rx2 = dict(self.RECEIVER, path=b"rx2", serial_number="111111111111")
+        both = [self.RECEIVER, rx2]
+        self.poll_with(p, both, {b"rx": FakeMouse(0xFF), b"rx2": FakeMouse(0xFF)})
+        out = self.poll_with(p, both, {b"rx": FakeMouse(0xFF), b"rx2": AsleepMouse(0xFF)})
+        self.assertEqual(sorted(s.online for s in out), [False, True])
+
+    def test_devices_not_in_the_table_are_left_alone(self):
+        # only KNOWN says that two PIDs are one mouse; a shared product string does not
+        p = R.RazerProvider()
+        a = entry(0x0B00, b"a", "Razer Wireless Thing")
+        b = entry(0x0B01, b"b", "Razer Wireless Thing")
+        self.poll_with(p, [a, b], {b"a": FakeMouse(0x1F), b"b": FakeMouse(0x1F)})
+        out = self.poll_with(p, [a, b], {b"a": FakeMouse(0x1F), b"b": AsleepMouse(0x1F)})
+        self.assertEqual(sorted(s.online for s in out), [False, True])
+
+    def test_greyed_icons_alone_are_not_merged(self):
+        # only a PID that answers hides the other one; two silent PIDs keep their icons
+        p = R.RazerProvider()
+        both = [self.RECEIVER, self.CABLE]
+        self.poll_with(p, both, {b"rx": FakeMouse(0xFF), b"usb": FakeMouse(0xFF)})
+        out = self.poll_with(p, both, {b"rx": AsleepMouse(0xFF), b"usb": AsleepMouse(0xFF)})
+        self.assertEqual([s.online for s in out], [False, False])
+
+    def test_another_model_keeps_its_greyed_icon(self):
+        p = R.RazerProvider()
+        other = entry(0x007D, b"da", "Razer DeathAdder V2 Pro")
+        self.poll_with(p, [other], {b"da": FakeMouse(0x3F)})
+        out = self.poll_with(p, [other, self.CABLE],
+                             {b"da": AsleepMouse(0x3F), b"usb": FakeMouse(0xFF, charging=1)})
+        self.assertEqual(sorted((s.key, s.online) for s in out),
+                         [("razer:007a:000000000000", True), ("razer:007d:000000000000", False)])
 
 
 if __name__ == "__main__":

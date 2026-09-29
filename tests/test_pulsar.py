@@ -12,6 +12,10 @@ The same mouse on its cable (3554:f58c) is the reporter's second report in that 
 lists the same eight collections, so the same rule picks ff02:0002 and the same frame
 applies.
 
+The Hitscan Hyperlight (3770:0200 on its receiver, 3770:0100 on the cable, #105) is
+faked with its own collection list and the frames sopparus/hitscan-battery captured
+from the vendor application; the same rule picks its ff02:0002 collection.
+
 hidlist.enumerate() and hid.device() are replaced: the real ones ask Windows for
 collections of real devices.
 
@@ -37,6 +41,17 @@ SHAPE = [
     (1, 0x0001, 0x0080),
     (1, 0xFF02, 0x0002),
     (1, 0xFF04, 0x0002),
+    (2, 0x0001, 0x0002),
+]
+
+# the Hitscan Hyperlight receiver (3770:0200) as #105's diagnostics list its collections
+HITSCAN_SHAPE = [
+    (1, 0xFF04, 0x0002),
+    (1, 0xFF05, 0x0000),
+    (1, 0xFF03, 0x0000),
+    (1, 0x000C, 0x0001),
+    (1, 0x0001, 0x0080),
+    (1, 0xFF02, 0x0002),
     (2, 0x0001, 0x0002),
 ]
 
@@ -296,6 +311,35 @@ class PulsarTest(unittest.TestCase):
         bus = self.one_receiver(vid=0x3554, pid=0x1234, replies=[reply(78)])
         self.assertEqual([], P.PulsarProvider().poll())
         self.assertEqual([], bus.written())
+
+    def test_the_hitscan_receiver_is_read(self):
+        bus = self.one_receiver(vid=0x3770, pid=0x0200, replies=[reply(100, 0, 4393)],
+                                shape=HITSCAN_SHAPE)
+        found = P.PulsarProvider().poll()
+        self.assertEqual(1, len(found))
+        self.assertEqual("Hitscan Hyperlight (2.4 GHz)", found[0].name)
+        self.assertEqual(100, found[0].level)
+        self.assertEqual("pulsar:37700200", found[0].key)
+        self.assertEqual([(0xFF02, 0x0002)], bus.written())
+
+    def test_the_hitscan_on_its_cable_is_read(self):
+        self.one_receiver(vid=0x3770, pid=0x0100, replies=[reply(74, 1, 4000)],
+                          shape=HITSCAN_SHAPE)
+        found = P.PulsarProvider().poll()
+        self.assertEqual("Hitscan Hyperlight (wired)", found[0].name)
+        self.assertEqual(74, found[0].level)
+
+    def test_the_captured_hitscan_frames_parse(self):
+        """The literal frames in sopparus/hitscan-battery's NOTES.md, byte 5 being
+        0x02 there - which this provider does not check, and must not. The second is
+        the one that disproved the vendor app's indicator: the device answered 75
+        while Hitscan Utility displayed 100."""
+        for raw, level, mv in (("08040000000264001129000000000000a9", 100, 4393),
+                               ("0804000000024b00107300000000000079", 75, 4211),
+                               ("0804000000026400112d000000000000a5", 100, 4397)):
+            frame = bytes.fromhex(raw)
+            self.assertEqual((level, False), P.parse_power(frame))
+            self.assertEqual(mv, P.voltage_mv(frame))
 
 
 if __name__ == "__main__":

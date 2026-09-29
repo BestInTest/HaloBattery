@@ -91,6 +91,9 @@ def make_app(cfg=None):
     app.light_taskbar = False
     app.update = None
     app.notes = []
+    app.key_provider = {}
+    app.held = {}
+    app.history = hb.history.History()      # in memory: no path, never written
     return app
 
 
@@ -105,6 +108,8 @@ class HideRenameTestCase(unittest.TestCase):
             mock.patch.object(hb.pystray, "Icon", FakeTrayIcon),
             mock.patch.object(hb.time, "sleep", lambda s: None),
             mock.patch.object(hb, "save_config", lambda cfg: self.saved.append(dict(cfg))),
+            # never depend on what is full screen on the machine running the tests
+            mock.patch.object(hb, "fullscreen_app_running", lambda: False),
             # stop() runs in a thread in hide(); run it at once so the test can check it
             mock.patch.object(hb.threading, "Thread",
                               lambda target, args=(), daemon=None: types.SimpleNamespace(
@@ -247,7 +252,8 @@ class MenuLayoutTests(HideRenameTestCase):
         app.apply([dev()])
         texts = [i.text for i in app.build_menu(app.icons["logitech:C15E09CD"]).items
                  if i.visible and i is not hb.Menu.SEPARATOR]
-        self.assertEqual(texts, ["G502 LIGHTSPEED: 76%", "Rename…", "Icon", "Hide this device",
+        self.assertEqual(texts, ["G502 LIGHTSPEED: 76%", "Rename…", "Icon", "Low battery alert at",
+                                 "Hide this device",
                                  "Refresh now", "Preferences", "Diagnostics…",
                                  f"Exit (v{hb.VERSION})"])
 
@@ -256,7 +262,8 @@ class MenuLayoutTests(HideRenameTestCase):
         app.apply([dev()])
         texts = [i.text for i in app.build_menu(app.icons["logitech:C15E09CD"]).items
                  if i.visible and i is not hb.Menu.SEPARATOR]
-        self.assertEqual(texts, ["G502 LIGHTSPEED: 76%", "Rename…", "Icon", "Hide this device",
+        self.assertEqual(texts, ["G502 LIGHTSPEED: 76%", "Rename…", "Icon", "Low battery alert at",
+                                 "Hide this device",
                                  "Refresh now", "Preferences", "Hidden devices",
                                  "Diagnostics…", f"Exit (v{hb.VERSION})"])
 
@@ -266,8 +273,11 @@ class MenuLayoutTests(HideRenameTestCase):
         prefs = next(i for i in menu.items if i.text == "Preferences").submenu
         texts = [i.text for i in prefs.items if i is not hb.Menu.SEPARATOR]
         self.assertEqual(texts, ["Poll interval", "Low battery alert", "Alert when fully charged",
+                                 "Estimated time left", "Quiet while gaming",
                                  "Windows Bluetooth devices", "PlayStation full mode (Bluetooth)",
-                                 "Device pictogram", "Charging animation", "Icon colour",
+                                 "Device types",
+                                 "Device pictogram", "Percentage in the icon", "Charging animation",
+                                 "Icon colour", "Status file for other apps",
                                  "Start with Windows", "Check for updates"])
 
 

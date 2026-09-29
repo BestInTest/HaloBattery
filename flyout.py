@@ -51,6 +51,9 @@ HOVER_RADIUS = 4
 CHECK_COLUMN = 24
 CHEVRON_GAP = 16                     # between the text and the submenu chevron
 SEP_MARGIN_X, SEP_MARGIN_Y = 12, 4
+HEADER_PAD_T, HEADER_PAD_B = 8, 8     # inside the header (above its title, below its detail)
+HEADER_LINE_GAP = 2                  # between the title and the detail
+EDIT_GAP = 8                         # between the header's title and its pencil button
 BUTTON_W, BUTTON_H, BUTTON_RADIUS = 28, 26, 4
 VALUE_MIN_W = 34
 COUNTER_GAP = 16                     # between the text and the - button
@@ -64,16 +67,18 @@ POLL_MS = 30                         # outside clicks and focus, while the menu 
 TEXT_FONTS = ("Segoe UI Variable Text", "Segoe UI")
 TEXT_PX = 13
 ICON_FONTS = ("Segoe Fluent Icons", "Segoe MDL2 Assets")
-CHECK, CHEVRON, MINUS, PLUS = "\uE73E", "\uE76C", "\uE738", "\uE710"
+CHECK, CHEVRON, MINUS, PLUS, EDIT = "\uE73E", "\uE76C", "\uE738", "\uE710", "\uE70F"
 CHECK_PX, CHEVRON_PX, BUTTON_PX = 12, 10, 11
 # when neither icon font is there (not Windows 10 / 11)
-FALLBACK_GLYPHS = {CHECK: "\u2713", CHEVRON: "\u203A", MINUS: "\u2212", PLUS: "+"}
+FALLBACK_GLYPHS = {CHECK: "\u2713", CHEVRON: "\u203A", MINUS: "\u2212", PLUS: "+", EDIT: "\u270E"}
 
 # ARGB, as in the design: the first two digits are the opacity
 PALETTE = {
     False: {"tint": "#99202020", "text": "#F2F2F2", "muted": "#99F2F2F2",     # dark theme
+            "faint": "#4DF2F2F2",
             "hover": "#1AFFFFFF", "separator": "#26FFFFFF", "border": "#33FFFFFF"},
     True: {"tint": "#99F3F3F3", "text": "#1A1A1A", "muted": "#991A1A1A",      # light theme
+           "faint": "#4D1A1A1A",
            "hover": "#12000000", "separator": "#1A000000", "border": "#26000000"},
 }
 OVERLAY_KEY = "#FF00FE"      # transparent colour of the highlight window (its corners)
@@ -122,6 +127,7 @@ def colours(light: bool) -> dict:
         "key": key,
         "text": over(p["text"], base),
         "muted": over(p["muted"], base),
+        "faint": over(p["faint"], base),          # the header's pencil, when not hovered
         "separator": over(p["separator"], base),
         "border": over(p["border"], base),
         "hover": "#%02x%02x%02x" % (hr, hg, hb),
@@ -136,6 +142,35 @@ Rect = Tuple[int, int, int, int]      # left, top, right, bottom
 
 def _clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(v, hi)) if hi >= lo else lo
+
+
+def usable_area(work: Rect, taskbar: Optional[Rect]) -> Rect:
+    """The work area without the taskbar.
+
+    The monitor's work area leaves the taskbar out only while the taskbar reserves its
+    space. An auto-hide taskbar does not, and neither does the taskbar over a full
+    screen game after the Windows key brings it up: the work area is then the whole
+    screen, and a menu placed in it can open behind the taskbar. The taskbar's own
+    rectangle is cut off the side it sits on."""
+    left, top, right, bottom = work
+    if taskbar is None:
+        return work
+    tl, tt, tr, tb = taskbar
+    if tr <= left or tl >= right or tb <= top or tt >= bottom:
+        return work                                    # not on this area
+    if tr - tl > tb - tt:                              # horizontal taskbar
+        if tt > top:
+            bottom = min(bottom, tt)                   # at the bottom
+        else:
+            top = max(top, tb)                         # at the top
+    else:                                              # vertical taskbar
+        if tl > left:
+            right = min(right, tl)                     # on the right
+        else:
+            left = max(left, tr)                       # on the left
+    if right <= left or bottom <= top:
+        return work                                    # a taskbar that fills the area
+    return left, top, right, bottom
 
 
 def place_menu(cx: int, cy: int, w: int, h: int, work: Rect,
@@ -223,6 +258,70 @@ class CounterItem(Item):
         return True
 
 
+# ------------------------------------------------------------------ header item
+class HeaderItem(Item):
+    """The heading at the top of a menu: a title (the device's name) and a detail
+    (its level, charging, time left). The flyout shows the detail on the line below
+    the title and wraps both to the width the other items need, so a long heading
+    never makes the menu wider. It cannot be chosen.
+
+    `edit` (called with the tray icon) adds a pencil button at the right of the title,
+    dim until the mouse is over it; the classic menu cannot show it, so keep an
+    ordinary item for it there (classic_only()).
+
+    The classic menu (and anything else that does not know this class) sees one
+    disabled item "title: detail"."""
+
+    def __init__(self, title: Callable[[], str], detail: Callable[[], str] = lambda: "",
+                 edit: Optional[Callable[[object], None]] = None, **kwargs):
+        self._title, self._detail = title, detail
+        self.edit = edit
+
+        def text(_item):
+            t, d = self.title(), self.detail()
+            return f"{t}: {d}" if d else t
+
+        kwargs.setdefault("enabled", False)
+        super().__init__(text, None, **kwargs)
+
+    def title(self) -> str:
+        return str(self._title() or "")
+
+    def detail(self) -> str:
+        return str(self._detail() or "")
+
+
+def classic_only(item: Item) -> Item:
+    """Mark an item that only the classic menu shows (the flyout has another way to
+    do the same, e.g. the pencil of a HeaderItem)."""
+    item.flyout_hidden = True
+    return item
+
+
+def wrap(text: str, width: int, measure) -> List[str]:
+    """Split `text` into lines no wider than `width` (as `measure` counts it): at
+    spaces, and inside a word only when the word alone does not fit."""
+    lines: List[str] = []
+    cur = ""
+    for word in text.split():
+        cand = f"{cur} {word}" if cur else word
+        if measure(cand) <= width:
+            cur = cand
+            continue
+        if cur:
+            lines.append(cur)
+        while len(word) > 1 and measure(word) > width:
+            n = 1
+            while n < len(word) and measure(word[:n + 1]) <= width:
+                n += 1
+            lines.append(word[:n])
+            word = word[n:]
+        cur = word
+    if cur or not lines:
+        lines.append(cur)
+    return lines
+
+
 # ------------------------------------------------------------------ Windows
 def enable_dpi_awareness() -> None:
     """Tell Windows the app draws for the monitor's real DPI. Without this Windows
@@ -275,6 +374,8 @@ class _Win32:
         u.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         u.GetForegroundWindow.restype = ctypes.c_void_p
         u.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+        u.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
         u.GetAsyncKeyState.restype = ctypes.c_short
         u.GetAsyncKeyState.argtypes = [ctypes.c_int]
         self.swca = getattr(u, "SetWindowCompositionAttribute", None)
@@ -373,6 +474,15 @@ class _Win32:
         except Exception:
             pass
 
+    def to_top(self, hwnd: int) -> None:
+        """Put a topmost window in front of the other topmost windows, without moving,
+        resizing or activating it."""
+        try:
+            # HWND_TOPMOST, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+            self.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+        except Exception:
+            pass
+
     def dwm_int(self, hwnd: int, attr: int, value: int) -> None:
         if self.dwm is None:
             return
@@ -424,9 +534,13 @@ class _Style:
 
 class _Row:
     def __init__(self, kind: str, item=None):
-        self.kind = kind            # "item", "sep" or "counter"
+        self.kind = kind            # "item", "sep", "counter" or "header"
         self.item = item
         self.text = ""
+        self.title = ""             # a header: its title and detail ...
+        self.detail = ""
+        self.lines: List[Tuple[str, bool]] = []   # ... wrapped: (text, is the detail)
+        self.edit = None            # a header's pencil button: its action
         self.checked: Optional[bool] = None
         self.enabled = True
         self.submenu = None
@@ -435,6 +549,8 @@ class _Row:
 
     @property
     def selectable(self) -> bool:
+        if self.kind == "header":
+            return self.edit is not None          # only its pencil button
         return self.kind != "sep" and self.enabled
 
 
@@ -442,8 +558,22 @@ def build_rows(menu) -> List[_Row]:
     """The visible items of a pystray Menu, with their texts and states read once."""
     rows: List[_Row] = []
     for it in menu:
+        if getattr(it, "flyout_hidden", False):
+            continue
         if it is Menu.SEPARATOR:
-            rows.append(_Row("sep"))
+            if not (rows and rows[-1].kind == "header"):     # the header has its own line
+                rows.append(_Row("sep"))
+            continue
+        if isinstance(it, HeaderItem):
+            row = _Row("header", it)
+            row.enabled = False
+            row.edit = it.edit
+            try:
+                row.title, row.detail = it.title(), it.detail()
+            except Exception as e:
+                log.warning("menu header: %s", e)
+            row.text = f"{row.title}: {row.detail}" if row.detail else row.title
+            rows.append(row)
             continue
         row = _Row("counter" if isinstance(it, CounterItem) else "item", it)
         try:
@@ -459,29 +589,80 @@ def build_rows(menu) -> List[_Row]:
 
 
 def layout(rows: List[_Row], style: _Style, measure_text, measure_glyph) -> Tuple[int, int]:
-    """Set each row's y and height; -> (width, height) of the panel."""
+    """Set each row's y and height; -> (width, height) of the panel. A header does not
+    count for the width: its lines are wrapped to the width the other rows need."""
     px = style.px
     item_h = px(ITEM_MARGIN_Y) * 2 + px(ITEM_PAD_T) + style.line + px(ITEM_PAD_B)
     counter_h = max(item_h, px(ITEM_MARGIN_Y) * 2 + px(BUTTON_H))
     sep_h = px(SEP_MARGIN_Y) * 2 + px(1)
-    y = px(PAD_Y)
     content = 0
+    for row in rows:
+        if row.kind in ("sep", "header"):
+            continue
+        w = measure_text(row.text)
+        if row.kind == "counter":
+            w += px(COUNTER_GAP) + counter_width(row.item, style, measure_text)
+        elif row.submenu is not None:
+            w += px(CHEVRON_GAP) + measure_glyph(style.glyph(CHEVRON))
+        content = max(content, w)
+    width = max(px(MIN_WIDTH), px(ITEM_MARGIN_X) + px(ITEM_PAD_L) + px(CHECK_COLUMN) + content
+                + px(ITEM_PAD_R) + px(ITEM_MARGIN_X))
+    header_w = header_text_width(width, style)
+    y = px(PAD_Y)
     for row in rows:
         row.y = y
         if row.kind == "sep":
             row.h = sep_h
+        elif row.kind == "header":
+            title_w = header_w - (px(EDIT_GAP) + px(BUTTON_W) if row.edit is not None else 0)
+            row.lines = [(t, False) for t in wrap(row.title, title_w, measure_text)]
+            if row.detail:
+                row.lines += [(t, True) for t in wrap(row.detail, header_w, measure_text)]
+            row.h = header_height(row, style)
         else:
             row.h = counter_h if row.kind == "counter" else item_h
-            w = measure_text(row.text)
-            if row.kind == "counter":
-                w += px(COUNTER_GAP) + counter_width(row.item, style, measure_text)
-            elif row.submenu is not None:
-                w += px(CHEVRON_GAP) + measure_glyph(style.glyph(CHEVRON))
-            content = max(content, w)
         y += row.h
-    width = (px(ITEM_MARGIN_X) + px(ITEM_PAD_L) + px(CHECK_COLUMN) + content
-             + px(ITEM_PAD_R) + px(ITEM_MARGIN_X))
-    return max(px(MIN_WIDTH), width), y + px(PAD_Y)
+    return width, y + px(PAD_Y)
+
+
+def header_text_width(width: int, style: _Style) -> int:
+    """Room for a header's text in a panel `width` wide: from the items' text column
+    to the right padding."""
+    px = style.px
+    return width - px(ITEM_MARGIN_X) * 2 - px(ITEM_PAD_L) - px(CHECK_COLUMN) - px(ITEM_PAD_R)
+
+
+def header_height(row: _Row, style: _Style) -> int:
+    """Padding, the lines (a small gap before the detail) and a separator below."""
+    px = style.px
+    gap = px(HEADER_LINE_GAP) if any(d for _t, d in row.lines) and len(row.lines) > 1 else 0
+    return (px(HEADER_PAD_T) + style.line * len(row.lines) + gap + px(HEADER_PAD_B)
+            + px(SEP_MARGIN_Y) * 2 + px(1))
+
+
+def header_line_tops(row: _Row, style: _Style) -> List[int]:
+    """The top of each of a header's lines, in panel coordinates."""
+    px = style.px
+    y, tops, seen_detail = row.y + px(HEADER_PAD_T), [], False
+    for _text, is_detail in row.lines:
+        if is_detail and not seen_detail:
+            seen_detail = True
+            if tops:
+                y += px(HEADER_LINE_GAP)
+        tops.append(y)
+        y += style.line
+    return tops
+
+
+def edit_box(row: _Row, width: int, style: _Style) -> Tuple[int, int, int, int]:
+    """A header's pencil button, in panel coordinates: at the right, level with the
+    first line of the title."""
+    px = style.px
+    right = width - px(ITEM_MARGIN_X) - px(ITEM_PAD_R) + px(BUTTON_W) // 4
+    bw, bh = px(BUTTON_W), px(BUTTON_H)
+    mid = header_line_tops(row, style)[0] + style.line // 2
+    top = mid - bh // 2
+    return right - bw, top, right, top + bh
 
 
 def counter_width(item: CounterItem, style: _Style, measure_text) -> int:
@@ -617,6 +798,7 @@ class FlyoutHost:
         else:
             work = (0, 0, self._root.winfo_screenwidth(), self._root.winfo_screenheight())
             scale = 1.0
+        work = usable_area(work, taskbar)            # submenus use it too (panel.work)
         style = self.style(scale, apps_use_light_theme())
         panel = _Panel(self, menu, style, None, None)
         if not panel.rows:
@@ -748,6 +930,11 @@ class FlyoutHost:
         row = panel.rows[index]
         if not row.selectable:
             return
+        if row.kind == "header":
+            edit, icon = row.edit, self._icon
+            self.close()
+            threading.Thread(target=self._run_edit, args=(edit, icon), daemon=True).start()
+            return
         if row.kind == "counter":
             if part in ("minus", "plus"):
                 self._step(panel, index, -1 if part == "minus" else +1)
@@ -759,6 +946,13 @@ class FlyoutHost:
         self.close()
         # the action may wait (an input box, a notification): not in this thread
         threading.Thread(target=self._run, args=(item, icon), daemon=True).start()
+
+    @staticmethod
+    def _run_edit(edit, icon) -> None:
+        try:
+            edit(icon)
+        except Exception as e:
+            log.exception("menu header: %s", e)
 
     @staticmethod
     def _run(item, icon) -> None:
@@ -855,6 +1049,7 @@ class _Panel:
         self.child_row: Optional[int] = None
         self.win = self.canvas = self.catcher = self.overlay = self.ocanvas = None
         self.hwnd = 0
+        self._overlay_hwnd = 0
         self._hwnds: List[int] = []
         self._overlay_geo = None
         self._fade_start = 0.0
@@ -919,6 +1114,7 @@ class _Panel:
                 pass
         self._hwnds = list(frames.values())
         self.hwnd = frames.get("win", 0)
+        self._overlay_hwnd = frames.get("overlay", 0)
         if w is None or not self.hwnd:
             return
         c = self.style.colours
@@ -974,6 +1170,20 @@ class _Panel:
                 cv.create_rectangle(px(SEP_MARGIN_X), y, self.w - px(SEP_MARGIN_X) - 1,
                                     y + px(1) - 1, outline="", fill=c["separator"])
                 continue
+            if row.kind == "header":
+                for (text, is_detail), top in zip(row.lines, header_line_tops(row, st)):
+                    cv.create_text(x_text, top, text=text, font=st.font,
+                                   fill=c["muted"] if is_detail else c["text"], anchor="nw")
+                if row.edit is not None:
+                    x0, y0, x1, y1 = edit_box(row, self.w, st)
+                    lit = self.hover == self.rows.index(row) and self.part in ("edit", "keyboard")
+                    cv.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=st.glyph(EDIT),
+                                   font=st.button_font, fill=c["text"] if lit else c["faint"],
+                                   anchor="center")
+                y = row.y + row.h - px(SEP_MARGIN_Y) - px(1)
+                cv.create_rectangle(px(SEP_MARGIN_X), y, self.w - px(SEP_MARGIN_X) - 1,
+                                    y + px(1) - 1, outline="", fill=c["separator"])
+                continue
             fg = c["text"] if row.enabled else c["muted"]
             if row.checked:
                 cv.create_text(x_check + px(CHECK_COLUMN) // 2, mid,
@@ -1026,6 +1236,11 @@ class _Panel:
             if row.y <= ly < row.y + row.h:
                 if not row.selectable:
                     return None, None
+                if row.kind == "header":
+                    x0, y0, x1, y1 = edit_box(row, self.w, self.style)
+                    if x0 <= lx < x1 and y0 <= ly < y1:
+                        return i, "edit"
+                    return None, None
                 if row.kind == "counter":
                     minus, plus, _v = self._counter_boxes(row)
                     for name, (x0, y0, x1, y1) in (("minus", minus), ("plus", plus)):
@@ -1036,8 +1251,15 @@ class _Panel:
         return None, None
 
     def set_hover(self, index: Optional[int], part: Optional[str]) -> None:
+        was = self._pencil_lit()
         self.hover, self.part = index, part
+        if self._pencil_lit() != was:
+            self.draw()                    # the pencil is brighter under the mouse
         self.update_highlight()
+
+    def _pencil_lit(self) -> bool:
+        return (self.hover is not None and self.rows[self.hover].kind == "header"
+                and self.part in ("edit", "keyboard"))
 
     def move_hover(self, delta: int) -> None:
         """Keyboard: the next / previous item that can be chosen."""
@@ -1060,6 +1282,8 @@ class _Panel:
         if not row.selectable:
             return None
         px = self.style.px
+        if row.kind == "header":
+            return edit_box(row, self.w, self.style)
         if row.kind == "counter" and self.part != "keyboard":
             if self.part not in ("minus", "plus"):
                 return None
@@ -1092,9 +1316,23 @@ class _Panel:
                 self.ocanvas.delete("all")
                 rounded_rect(self.ocanvas, 0, 0, w, h, self.style.px(HOVER_RADIUS), c["hover"])
                 self._overlay_geo = geo
+                # Tk moves the window later, when idle; raising it before that would
+                # make Tk keep the old position
+                ov.update_idletasks()
+            self._raise_overlay()
             ov.attributes("-alpha", c["hover_alpha"])
         except Exception:
             pass
+
+    def _raise_overlay(self) -> None:
+        """The highlight in front of the panel. Opening the menu gives the panel the focus,
+        which brings it to the front, and its acrylic then hides a highlight behind it.
+        Tk's lift() is not used: on these borderless windows it also moved the highlight
+        back to the corner of the panel."""
+        w = self.host._w
+        hwnd = self._overlay_hwnd
+        if w is not None and hwnd:
+            w.to_top(hwnd)
 
     def _fade_running(self) -> bool:
         return (time.perf_counter() - self._fade_start) * 1000 < FADE_MS

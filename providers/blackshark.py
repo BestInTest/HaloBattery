@@ -157,9 +157,19 @@ class PASession:
 
 
 def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool]:
-    """-> ('ok'|'offline'|'fail', level, charging)
-    'offline' - the interface accepts commands but the headset does not reply (off).
-    'fail'    - wrong interface / could not be opened.
+    """-> ('ok'|'offline'|'nowake'|'fail', level, charging)
+
+    'ok'      - a reading.
+    'offline' - the interface accepted a command and the headset did not answer the battery
+                query: this IS the right collection, the headset is switched off.
+    'nowake'  - the interface opened but never accepted a single command (or the reopen
+                failed): the receiver is present, but the headset is off, the USB device is
+                suspended, or this is the wrong collection.
+    'fail'    - could not be opened at all.
+
+    'offline' and 'nowake' look identical from the outside - both mean "no reading" - but they
+    are not interchangeable to a caller that remembers the collection it talked to: only
+    'offline' proves the path speaks this protocol. See RazerProvider._poll_pa.
     """
     try:
         s = PASession(path, diag)
@@ -186,15 +196,18 @@ def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool
                 s = PASession(path, diag)
             except (OSError, IOError) as e:
                 diag.append(f"    reopen: {e}")
-                return "offline", None, False
+                return "nowake", None, False     # nothing was accepted: same as above
         if not woke:
             # The interface opened, so the receiver is present: show "no link"
-            # instead of removing the icon.
+            # instead of removing the icon. But "opened" is all this proves - a wrong
+            # collection looks exactly like this, so the caller must not remember the path.
             diag.append("    receiver does not accept commands (headset off or USB asleep)")
-            return "offline", None, False
+            return "nowake", None, False
         time.sleep(0.035)
         bat = s.query(CMD_BATTERY)
         if not bat:
+            # The remote-on was accepted, so this path does speak the protocol; the headset
+            # is simply not answering. This is the one "no reading" answer worth remembering.
             return "offline", None, False
         level = bat[0]
         if level > 100:
