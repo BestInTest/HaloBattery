@@ -69,8 +69,11 @@ def parse_reply(data) -> Optional[Tuple[int, int, int]]:
     return state, voltage, data[14]
 
 
-def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool]:
-    """Return ('ok'|'offline'|'fail', level or None, charging).
+def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], Optional[bool]]:
+    """Return ('ok'|'offline'|'fail', level or None, charging or None).
+
+    A fresh reply establishes connectivity independently of its power state.
+    An unknown power state leaves charging unknown, without hiding the level.
 
     Byte 14 remained 0x50 through extended charging, then changed to 0x64
     with state 0x06 when headset LED indicated a full charge.
@@ -98,13 +101,19 @@ def read_battery(path: bytes, diag: List[str]) -> Tuple[str, Optional[int], bool
                             f"byte14={raw14:02x}")
                 if voltage == 0:
                     return "offline", None, False
-                # On battery: 0x02 with the low-battery warning, then 0x03 at 10%.
-                if state not in (0x01, 0x02, 0x03, 0x06, 0x09):
-                    diag.append(f"    [2020] unknown power state: {state:02x}")
-                    return "fail", None, False
+                # Only infer charging from observed states, not individual bits.
+                # New discharge states must not discard a fresh battery reading.
+                if state == 0x09:
+                    charging = True
+                elif state in (0x01, 0x02, 0x03, 0x06):
+                    charging = False
+                else:
+                    charging = None
+                    diag.append(f"    [2020] unknown power state: {state:02x}; "
+                                "keeping fresh reading, charging unknown")
                 level = raw14 if 0 <= raw14 <= 100 else None
                 diag.append(f"    [2020] device-reported level={level}")
-                return "ok", level, state == 0x09
+                return "ok", level, charging
             if time.monotonic() >= deadline:
                 if len(data) == REPORT_LEN and bytes(data).startswith(NO_REPLY_PREFIX):
                     diag.append("    [2020] no fresh headset reply (off / out of range)")

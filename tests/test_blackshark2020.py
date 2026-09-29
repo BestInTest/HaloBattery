@@ -113,10 +113,17 @@ class BatteryTests(unittest.TestCase):
     def test_read_error_closes_device(self):
         self.assertEqual(self.read([OSError("disconnected")]), ("fail", None, False))
 
-    def test_unknown_power_state_is_not_guessed(self):
-        data = bytearray(BATTERY)
-        data[11] = 0xFF  # No hardware observation establishes this state.
-        self.assertEqual(self.read([data]), ("fail", None, False))
+    def test_unknown_power_state_keeps_level_without_guessing_charging(self):
+        for state in range(256):
+            if state in (0x01, 0x02, 0x03, 0x06, 0x09):
+                continue
+            for raw_level, expected in ((0, 0), (10, 10), (80, 80), (100, 100),
+                                        (101, None), (255, None)):
+                with self.subTest(state=state, level=raw_level):
+                    data = bytearray(BATTERY)
+                    data[11] = state
+                    data[14] = raw_level
+                    self.assertEqual(self.read([data]), ("ok", expected, None))
 
     def test_zero_voltage_is_offline(self):
         data = bytearray(BATTERY)

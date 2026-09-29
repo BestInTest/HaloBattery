@@ -347,6 +347,8 @@ class RazerProvider(Provider):
                     approx = "battery level unknown"
                     if charging:
                         approx += ", charging"
+                if pid == blackshark2020.PID and charging is None:
+                    approx = (approx or f"{level}%") + ", charging state unknown"
                 out.append(DeviceStatus(key, name, level, bool(charging), True, "razer",
                                         approx=approx))
         return out
