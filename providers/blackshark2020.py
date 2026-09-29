@@ -19,7 +19,7 @@ Each frame above is 64 bytes; the remaining bytes in these reads were zero.
 Physical states were checked during the reads, including the full-charge LED.
 Bytes 9-10 also vary and are deliberately not part of REPLY_PREFIX.
 
-Further direct reads on 2026-09-29 recorded these first 16 bytes:
+Further direct reads recorded these first 16 bytes:
   on battery:       ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e a0 32 00
   on battery later: ff 0f 05 fe 12 04 1f 08 05 03 05 01 0e 70 32 00
   low battery:      ff 0f 05 fe 12 04 1f 08 05 03 05 02 0e 08 1e 00
